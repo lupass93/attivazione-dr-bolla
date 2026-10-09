@@ -1,0 +1,14 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.csv
+!examples/vms.csv
+local.settings.json
+function-app/Modules/Az.*/
+out/
+*.zip
+*.log
+.DS_Store
