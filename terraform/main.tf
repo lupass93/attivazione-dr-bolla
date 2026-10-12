@@ -34,20 +34,20 @@ data "azurerm_user_assigned_identity" "target" {
 }
 
 resource "azurerm_virtual_network" "hosting" {
-  name                = "${var.function_app_name}-vnet"
+  name                = lookup(var.resource_names, "virtual_network", "${var.function_app_name}-vnet")
   location            = var.location
   resource_group_name = data.azurerm_resource_group.hosting.name
   address_space       = var.vnet_address_space
 }
 
 resource "azurerm_subnet" "integration" {
-  name                 = "function-integration"
+  name                 = lookup(var.resource_names, "integration_subnet", "function-integration")
   resource_group_name  = data.azurerm_resource_group.hosting.name
   virtual_network_name = azurerm_virtual_network.hosting.name
   address_prefixes     = [var.integration_subnet_prefix]
 
   delegation {
-    name = "flex-consumption"
+    name = lookup(var.resource_names, "integration_subnet_delegation", "flex-consumption")
     service_delegation {
       name    = "Microsoft.App/environments"
       actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
@@ -56,7 +56,7 @@ resource "azurerm_subnet" "integration" {
 }
 
 resource "azurerm_subnet" "private_endpoints" {
-  name                 = "private-endpoints"
+  name                 = lookup(var.resource_names, "private_endpoints_subnet", "private-endpoints")
   resource_group_name  = data.azurerm_resource_group.hosting.name
   virtual_network_name = azurerm_virtual_network.hosting.name
   address_prefixes     = [var.private_endpoints_subnet_prefix]
@@ -64,46 +64,50 @@ resource "azurerm_subnet" "private_endpoints" {
 
 resource "azurerm_private_dns_zone" "storage" {
   for_each            = toset(["blob", "queue", "table"])
-  name                = "privatelink.${each.key}.core.windows.net"
+  name                = lookup(var.resource_names, "storage_private_dns_zone_${each.key}", "privatelink.${each.key}.core.windows.net")
   resource_group_name = data.azurerm_resource_group.hosting.name
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "storage" {
   for_each            = azurerm_private_dns_zone.storage
-  name                = "hosting-network"
+  name                = lookup(var.resource_names, "storage_private_dns_link_${each.key}", "hosting-network")
   private_dns_zone_id = each.value.id
   virtual_network_id  = azurerm_virtual_network.hosting.id
 }
 
 resource "azurerm_private_endpoint" "storage" {
   for_each            = azurerm_private_dns_zone.storage
-  name                = "${var.function_app_name}-storage-${each.key}"
+  name                = lookup(var.resource_names, "storage_private_endpoint_${each.key}", "${var.function_app_name}-storage-${each.key}")
   location            = var.location
   resource_group_name = data.azurerm_resource_group.hosting.name
   subnet_id           = azurerm_subnet.private_endpoints.id
 
   private_service_connection {
-    name                           = "storage-${each.key}"
+    name                           = lookup(var.resource_names, "storage_private_service_connection_${each.key}", "storage-${each.key}")
     private_connection_resource_id = data.azurerm_storage_account.hosting.id
     subresource_names              = [each.key]
     is_manual_connection           = false
   }
 
   private_dns_zone_group {
-    name                 = "storage"
+    name                 = lookup(var.resource_names, "storage_private_dns_zone_group_${each.key}", "storage")
     private_dns_zone_ids = [each.value.id]
   }
 }
 
 resource "azurerm_storage_container" "application" {
-  for_each              = toset(["app-package", "dr-configs", "dr-logs"])
-  name                  = each.key
+  for_each = {
+    "app-package" = lookup(var.resource_names, "deployment_container", "app-package")
+    "dr-configs"  = lookup(var.resource_names, "csv_container", "dr-configs")
+    "dr-logs"     = lookup(var.resource_names, "log_container", "dr-logs")
+  }
+  name                  = each.value
   storage_account_id    = data.azurerm_storage_account.hosting.id
   container_access_type = "private"
 }
 
 resource "azurerm_log_analytics_workspace" "hosting" {
-  name                = "${var.function_app_name}-logs"
+  name                = lookup(var.resource_names, "log_analytics_workspace", "${var.function_app_name}-logs")
   location            = var.location
   resource_group_name = data.azurerm_resource_group.hosting.name
   sku                 = "PerGB2018"
@@ -111,7 +115,7 @@ resource "azurerm_log_analytics_workspace" "hosting" {
 }
 
 resource "azurerm_application_insights" "hosting" {
-  name                         = "${var.function_app_name}-insights"
+  name                         = lookup(var.resource_names, "application_insights", "${var.function_app_name}-insights")
   location                     = var.location
   resource_group_name          = data.azurerm_resource_group.hosting.name
   application_type             = "web"
@@ -120,7 +124,7 @@ resource "azurerm_application_insights" "hosting" {
 }
 
 resource "azurerm_service_plan" "hosting" {
-  name                = "${var.function_app_name}-plan"
+  name                = lookup(var.resource_names, "service_plan", "${var.function_app_name}-plan")
   location            = var.location
   resource_group_name = data.azurerm_resource_group.hosting.name
   os_type             = "Linux"
@@ -171,8 +175,8 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     HOSTING_SUBSCRIPTION_ID                   = var.hosting_subscription_id
     TARGET_SUBSCRIPTION_ID                    = var.dr_subscription_id
     CSV_STORAGE_CONNECTION__blobServiceUri    = data.azurerm_storage_account.hosting.primary_blob_endpoint
-    CSV_CONTAINER_NAME                        = "dr-configs"
-    LOG_CONTAINER_NAME                        = "dr-logs"
+    CSV_CONTAINER_NAME                        = azurerm_storage_container.application["dr-configs"].name
+    LOG_CONTAINER_NAME                        = azurerm_storage_container.application["dr-logs"].name
     VM_PARALLEL_THROTTLE                      = "1"
     PARALLEL_THROTTLE                         = "1"
     PSWorkerInProcConcurrencyUpperBound       = "1"
@@ -192,37 +196,37 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
 }
 
 resource "azurerm_private_dns_zone" "function" {
-  name                = "privatelink.azurewebsites.net"
+  name                = lookup(var.resource_names, "function_private_dns_zone", "privatelink.azurewebsites.net")
   resource_group_name = data.azurerm_resource_group.hosting.name
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "function" {
-  name                = "hosting-network"
+  name                = lookup(var.resource_names, "function_private_dns_link", "hosting-network")
   private_dns_zone_id = azurerm_private_dns_zone.function.id
   virtual_network_id  = azurerm_virtual_network.hosting.id
 }
 
 resource "azurerm_private_endpoint" "function" {
-  name                = "${var.function_app_name}-endpoint"
+  name                = lookup(var.resource_names, "function_private_endpoint", "${var.function_app_name}-endpoint")
   location            = var.location
   resource_group_name = data.azurerm_resource_group.hosting.name
   subnet_id           = azurerm_subnet.private_endpoints.id
 
   private_service_connection {
-    name                           = "function"
+    name                           = lookup(var.resource_names, "function_private_service_connection", "function")
     private_connection_resource_id = azurerm_function_app_flex_consumption.hosting.id
     subresource_names              = ["sites"]
     is_manual_connection           = false
   }
 
   private_dns_zone_group {
-    name                 = "function"
+    name                 = lookup(var.resource_names, "function_private_dns_zone_group", "function")
     private_dns_zone_ids = [azurerm_private_dns_zone.function.id]
   }
 }
 
 resource "azurerm_monitor_diagnostic_setting" "function" {
-  name                       = "${var.function_app_name}-diagnostics"
+  name                       = lookup(var.resource_names, "function_diagnostic_setting", "${var.function_app_name}-diagnostics")
   target_resource_id         = azurerm_function_app_flex_consumption.hosting.id
   log_analytics_workspace_id = azurerm_log_analytics_workspace.hosting.id
 
@@ -236,7 +240,7 @@ resource "azurerm_monitor_diagnostic_setting" "function" {
 
 resource "azurerm_monitor_diagnostic_setting" "storage_services" {
   for_each                   = toset(["blob", "queue", "table"])
-  name                       = "${var.function_app_name}-${each.key}-diagnostics"
+  name                       = lookup(var.resource_names, "storage_diagnostic_setting_${each.key}", "${var.function_app_name}-${each.key}-diagnostics")
   target_resource_id         = "${data.azurerm_storage_account.hosting.id}/${each.key}Services/default"
   log_analytics_workspace_id = azurerm_log_analytics_workspace.hosting.id
 

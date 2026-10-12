@@ -26,6 +26,18 @@ output "storage_blob_endpoint" {
   value = data.azurerm_storage_account.hosting.primary_blob_endpoint
 }
 
+output "deployment_container_name" {
+  value = azurerm_storage_container.application["app-package"].name
+}
+
+output "csv_container_name" {
+  value = azurerm_storage_container.application["dr-configs"].name
+}
+
+output "log_container_name" {
+  value = azurerm_storage_container.application["dr-logs"].name
+}
+
 output "source_identity_client_id" {
   value = data.azurerm_user_assigned_identity.source.client_id
 }

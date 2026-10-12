@@ -12,3 +12,5 @@ out/
 *.zip
 *.log
 .DS_Store
+/README-OLD.md
+/README-V2-OLD.md

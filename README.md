@@ -1,131 +1,354 @@
-# Attivazione della bolla Disaster Recovery con Azure Functions
+# Attivazione Bolla - DR Replication Function
 
-Questo progetto crea l'hosting di una Azure Function App privata e pubblica due funzioni PowerShell per ricreare Virtual Machine (VM) in un ambiente Disaster Recovery (DR). Terraform usa soltanto il provider AzureRM. PowerShell 7.6 esegue il codice applicativo.
+Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure Storage un file Comma-Separated Values (CSV), elenco tabellare delle VM sorgenti, e ricrea Virtual Machine (VM) nel Disaster Recovery (DR), cioe l'ambiente di ripristino. Terraform usa solo AzureRM; due User-Assigned Managed Identity (UAMI), identita Azure senza password, separano letture/storage e operazioni DR.
 
-Questa versione locale modificata deriva da [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla). Il responsabile della pubblicazione ha confermato il diritto di redistribuire questa copia; non viene aggiunta una licenza non presente nel sorgente. Il test ha verificato hosting privato, due identita, quattro VM nuove dopo un reset delimitato, dieci dischi/snapshot cifrati e lettura coerente dei log. Non certifica la consistenza delle applicazioni o il loro servizio HTTP/HTTPS.
+> Questa soluzione deriva dalla copia corretta di [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla). Il README descrive il codice attuale; le migliorie indicate come proposte non sono implementate.
 
-## Quali risorse devono esistere prima di Terraform
+## Indice
 
-- Un Resource Group, cioe il contenitore Azure in cui creare il nuovo hosting.
-- Uno Storage Account di tipo StorageV2 con servizi Blob, Queue e Table. Lo storage conserva pacchetto, configurazioni CSV, log e informazioni di funzionamento dell'host. L'accesso pubblico e le shared key, chiavi condivise dell'account, non servono alla soluzione.
-- Due User-Assigned Managed Identity (UAMI), risorse identita Azure senza password, con ruoli gia assegnati.
-- Nella subscription DR: gruppi workload, Virtual Network (VNet), subnet, Application Security Group (ASG), Load Balancer e Disk Encryption Set (DES) con la configurazione di cifratura. La VNet e la rete privata; gli ASG raggruppano le NIC nelle regole di sicurezza; il DES collega i dischi alle chiavi di cifratura predisposte. Questi prerequisiti DR non vengono creati dal Terraform di hosting.
-- Una postazione con accesso alla rete privata della nuova Function e dello storage, con Domain Name System (DNS) che risolve i nomi dei servizi nei loro indirizzi privati. La sola autenticazione Azure non fornisce questa connessione.
+- [Architettura e risorse](#architettura-e-risorse)
+- [Assunzioni e prerequisiti nel DR](#assunzioni-e-prerequisiti-nel-dr)
+- [Esempi delle subscription sorgenti e DR](#esempi-delle-subscription-sorgenti-e-dr)
+- [Esempi dei nomi delle risorse DR](#esempi-dei-nomi-delle-risorse-dr)
+- [Esempi dei nomi dell'hosting Terraform](#esempi-dei-nomi-dellhosting-terraform)
+- [Responsabilita della Function sulle risorse DR](#responsabilita-della-function-sulle-risorse-dr)
+- [Come opera Invoke-DRReplication](#come-opera-invoke-drreplication)
+- [Come opera Get-DRStatus](#come-opera-get-drstatus)
+- [Pre-check prima del deployment](#pre-check-prima-del-deployment)
+- [Autenticazione e permessi](#autenticazione-e-permessi)
+- [Struttura del progetto](#struttura-del-progetto)
+- [Deployment della soluzione](#deployment-della-soluzione)
+- [Configurazione del CSV](#configurazione-del-csv)
+- [Attivazione e verifica](#attivazione-e-verifica)
+- [Limiti e troubleshooting](#limiti-e-troubleshooting)
+- [Migliorie prioritarie e verifiche](#migliorie-prioritarie-e-verifiche)
+- [Riferimenti](#riferimenti)
 
-Le subscription sorgenti e DR devono appartenere allo stesso tenant Microsoft Entra ID, il servizio Azure che gestisce le identita. Il codice richiede dischi gestiti e cifratura del disco OS tramite DES. Replica la NIC primaria e la sua IP configuration primaria, non tutte le NIC di una VM.
+## Architettura e risorse
 
-## Quale identita usa ogni operazione
+`Invoke-DRReplication` legge il CSV, individua VM/rete/dischi sorgenti, crea snapshot e dischi cifrati, ricrea NIC e VM e collega i backend pool. Una Network Interface (NIC) e l'interfaccia di rete della VM. `Get-DRStatus` legge CSV e log senza creare risorse.
 
-Role-Based Access Control (RBAC) e il controllo Azure che autorizza un'identita a eseguire determinate operazioni. Lo scope e l'ambito dell'assegnazione: un ruolo sulla subscription si eredita sulle risorse contenute. Per il deployment cliente descritto qui le assegnazioni sono a livello subscription, come previsto dal contesto di utilizzo, non limitate al Resource Group della Function. Quando hosting, storage, identita o primario sono in subscription diverse, assegnare i ruoli nelle rispettive subscription.
+Le due Application Programming Interface (API), interfacce di chiamata HTTP, usano Azure Resource Manager (ARM), il management endpoint Azure, per leggere e creare risorse. La replica non trasferisce file via sessioni remote nelle VM e non richiede peering al primario per queste operazioni di management. Il percorso privato verso Function e storage resta invece necessario ai client.
 
-| Quale identita viene selezionata | Quale ruolo deve essere gia assegnato | In quale subscription si assegna | Quali operazioni autorizza |
-|---|---|---|---|
-| UAMI sorgente/storage | Storage Blob Data Owner | Subscription dello storage esistente | Legge CSV e pacchetto, scrive log e gestisce i blob utilizzati dall'host. |
-| UAMI sorgente/storage | Storage Queue Data Contributor | Subscription dello storage esistente | Accede alle queue utilizzate dall'host. |
-| UAMI sorgente/storage | Storage Table Data Contributor | Subscription dello storage esistente | Accede alle table dello storage host. |
-| UAMI sorgente/storage | Reader | Ogni subscription primaria e ogni subscription che contiene risorse sorgenti referenziate | Legge VM, dischi, NIC, rete e riferimenti di cifratura del primario. |
-| UAMI sorgente/storage | Reader e Monitoring Metrics Publisher | Subscription di hosting e di Application Insights, se diversa | Legge il contesto di hosting e invia telemetria autenticata ad Application Insights. |
-| UAMI destinazione | Reader | Subscription DR e altre subscription che contengono i prerequisiti DR referenziati | Legge gruppi, DES, rete e Load Balancer di destinazione. |
-| UAMI destinazione | Virtual Machine Contributor | Subscription DR | Crea e aggiorna VM, dischi e risorse compute della bolla. |
-| UAMI destinazione | Disk Snapshot Contributor | Subscription DR | Crea, legge e gestisce gli snapshot di destinazione. |
-| UAMI destinazione | Network Contributor | Subscription DR e subscription di rete DR, se diversa | Crea le NIC e collega subnet, ASG e backend pool del Load Balancer. |
-| UAMI destinazione | Disk Backup Reader | Ogni subscription primaria contenente i dischi da copiare | Legge i dischi e autorizza l'accesso ai dati necessario alla copia dello snapshot. |
+| Quali risorse devono gia esistere | Quali risorse crea Terraform |
+|---|---|
+| Resource Group di hosting, Storage Account StorageV2 e due UAMI. | Piano Flex Consumption, Function privata, rete di hosting e due subnet separate. |
+| Nel DR: Resource Group, VNet/subnet, ASG, Load Balancer/backend pool e DES con Key Vault/chiave. | Private Endpoint della Function e dei servizi Blob/Queue/Table, con zone DNS private. |
+| Postazione con percorso di rete verso i servizi privati. | Container deployment/CSV/log, default `app-package`, `dr-configs`, `dr-logs`, Application Insights, Log Analytics workspace e diagnostica. |
 
-I permessi di due identita non si sommano nella stessa richiesta Azure. UAMI2 deve possedere `Microsoft.Compute/disks/beginGetAccess/action` sulla sorgente: Reader da solo non basta. Il ruolo Disk Backup Reader include lettura ed export del disco, non la sua modifica o quella della VM. La prova ha restituito `LinkedAuthorizationFailed` senza questo ruolo ed e riuscita dopo l'assegnazione approvata. Nel test il ruolo e stato limitato ai dieci dischi; nel contesto cliente la matrice sopra richiede scope subscription.
+Virtual Network (VNet) e la rete privata; Application Security Group (ASG) raggruppa interfacce nelle regole di sicurezza. Disk Encryption Set (DES) collega i dischi alla chiave di cifratura. Un Private Endpoint rende raggiungibile un servizio tramite IP privato; il Domain Name System (DNS) deve risolvere il nome del servizio in quell'IP.
 
-Un'assegnazione subscription e piu ampia: Disk Backup Reader permette l'export di tutti i dischi nell'ambito, mentre i ruoli Contributor DR permettono modifiche anche a risorse estranee alla bolla. Il gestore delle subscription deve approvare questo ambito, separare le due identita e verificare deny assignment, Azure Policy, condizioni dei ruoli e resource lock, che possono negare un'operazione anche in presenza di un ruolo. Non utilizzare Owner sulle UAMI come sostituto generico dei ruoli elencati.
+Terraform non crea o assegna i ruoli delle identita e non gestisce Resource Group, Storage Account o UAMI preesistenti. Nella configurazione attuale questi quattro prerequisiti devono appartenere alla subscription di hosting; possono essere in Resource Group differenti. La rete di hosting della Function e distinta dalla rete delle VM DR.
 
-Terraform non crea le identita o i loro ruoli workload. Il codice configura `SOURCE_IDENTITY_CLIENT_ID` e `TARGET_IDENTITY_CLIENT_ID`, gli identificativi delle identita selezionate; legge il primario con la prima e lavora in DR con la seconda. Gli upload dei log mantengono il contesto storage della prima identita.
+**Tre percorsi di osservabilita distinti:** i log di avanzamento vengono scritti da UAMI1 nel container log configurato, default `dr-logs`, e letti dall'API di stato; log/telemetria dell'host vengono inviati ad Application Insights con la stessa UAMI1 e autenticazione Microsoft Entra; le diagnostic settings inoltrano log/metriche dei servizi al workspace. Configurare questi percorsi non equivale a verificare salute o esito delle VM.
 
-## Quali permessi servono all'operatore
+**Destinazione attuale:** il CSV puo contenere piu subscription primarie, ma tutte le righe usano la stessa DR, impostata con `dr_subscription_id` / `TARGET_SUBSCRIPTION_ID`. Il suffisso `TARGET_SUBSCRIPTION_SUFFIX` non viene usato per risolvere una DR diversa per ciascuna primaria. Il requisito primaria A -> A-DR, primaria B -> B-DR richiede una correzione del codice, non la sola rimozione dell'app setting.
 
-L'operatore che esegue Terraform e il deploy usa un'identita diversa dalle due UAMI. I suoi ruoli devono essere gia assegnati prima dei comandi del README.
+## Assunzioni e prerequisiti nel DR
 
-| Quale ruolo usa l'operatore | In quale subscription si assegna | Per quale fase serve |
+La Function ricostruisce il workload dentro un ambiente gia predisposto; non replica la configurazione completa del sito primario. Il gestore del DR deve verificare questi prerequisiti per ogni VM del CSV prima della POST.
+
+| Quale prerequisito predisporre | Quale coerenza verificare con il primario |
+|---|---|
+| Resource Group delle VM replicate, della rete e della cifratura. | Nomi derivabili dalle risorse sorgenti con i suffissi configurati, default `-DR`; permessi dell'identita DR sugli ambiti effettivi. |
+| VNet e subnet DR. | VNet/Resource Group con i suffissi attesi; subnet con lo stesso nome sorgente. Il prefisso deve contenere l'IP sorgente, libero in DR: la nuova NIC lo riutilizza come statico. |
+| ASG DR, se presenti sulla NIC sorgente. | Nomi sorgenti con suffisso, nel Resource Group della VNet DR. Il codice non li crea; se un ASG manca, prosegue senza quel collegamento e scrive un warning. |
+| Load Balancer e backend pool DR, se il primario usa un Load Balancer. | Load Balancer/Resource Group con suffisso e pool selezionabile dal codice. Regole, probe, frontend e criteri di traffico devono essere gia configurati e verificati. |
+| DES e Key Vault/chiave DR. | Il disco OS sorgente deve avere un DES. Nome e Resource Group di quel DES, con suffisso, individuano il DES DR; la sua regione determina quella delle nuove risorse workload. Verificare chiave valida, identita DES autorizzata e accesso al vault. |
+| Policy di rete e capacita DR. | Network Security Group (NSG), cioe regole di traffico, routing, DNS e uscita coerenti con l'isolamento richiesto; disponibilita del modello VM, quota e compatibilita dei dischi. Non vengono ricopiati automaticamente. |
+| Compatibilita di copia e regione. | Il codice usa `Copy` direttamente dal disco, non una pipeline di trasferimento cross-region. Verificare il supporto dell'operazione per dischi, cifratura e regioni effettive; il solo cambio di `location` non certifica DR geografico. |
+
+Coerenza non significa copia integrale: il codice preserva solo le proprieta esplicitamente gestite. La presenza delle risorse non certifica permessi, isolamento di rete, disponibilita applicativa o consistenza dei dati.
+
+**Convenzione dei nomi:** Resource Group delle VM replicate, VNet, Load Balancer e DES = nome sorgente + rispettivo suffisso, default `-DR`; i Resource Group delle altre risorse seguono la stessa regola. La subnet mantiene il nome sorgente. Gli ASG aggiungono il suffisso al nome, ma risiedono nel gruppo della VNet DR.
+
+**Backend pool:** precedenza a `BACKEND_POOL_NAME_OVERRIDE`; poi corrispondenza univoca con il nome sorgente, unico pool DR o unico nome `bepool`/`backendpool`. Se la selezione e ambigua fallisce. Load Balancer multipli sulla NIC sorgente non sono supportati; non vengono riprodotti tutti i pool.
+
+### Esempi delle subscription sorgenti e DR
+
+Tutti i nomi seguenti sono fittizi. Il requisito e un abbinamento per primaria; **il codice attuale usa invece una sola DR globale**. Nell'esempio, `dr_subscription_id` identifica `sub-site-a-DR` e non viene calcolato dal CSV.
+
+| Nome della subscription primaria | Nome della DR richiesta | Destinazione usata oggi con questa configurazione |
 |---|---|---|
-| Contributor | Subscription di hosting e subscription dello storage esistente, se diversa | Legge i prerequisiti, crea hosting/rete/DNS/monitoring/container, configura diagnostica, pubblica codice e recupera le function key. Il data source storage puo leggere le chiavi nello state, anche se non vengono utilizzate per l'autenticazione applicativa. |
-| Managed Identity Operator | Subscription delle due UAMI, quando non gia coperta da Contributor | Consente di assegnare le UAMI esistenti alla nuova Function; non consente di creare assegnazioni RBAC. |
-| Storage Blob Data Contributor | Subscription dello storage esistente | Carica i CSV usando `--auth-mode login`; Contributor da solo non concede i permessi dati Blob. |
-| Reader | Subscription primarie e DR, per chi esegue la verifica delle risorse | Permette l'inventario e il controllo del risultato, senza autorizzare il reset dei cloni. |
+| `sub-site-a` | `sub-site-a-DR` | `sub-site-a-DR`, selezionata con `TARGET_SUBSCRIPTION_ID`. |
+| `sub-site-b` | `sub-site-b-DR` | Ancora `sub-site-a-DR`: il mapping per primaria non e implementato. |
 
-Chi predispone le assegnazioni usa Role Based Access Control Administrator, User Access Administrator o Owner negli scope interessati, secondo la governance aziendale. Questo privilegio amministrativo non e richiesto alla Function e non e necessario all'operatore del deployment quando tutti i ruoli sono gia assegnati. Il reset dei cloni DR e un'attivita distinta: richiede autorizzazione esplicita e permessi di gestione compute/rete nella subscription DR, senza eliminare Resource Group o prerequisiti.
+### Esempi dei nomi delle risorse DR
 
-## Quali prerequisiti tecnici verificare
+Esempio di una VM di `sub-site-a` ripristinata in `sub-site-a-DR`, con `target_name_suffix=-DR` per i suffissi configurati e `SNAPSHOT_NAME_PREFIX=snap-`. VM, dischi, snapshot e NIC di destinazione risiedono in `rg-site-a-vm-DR`. La naming convention si applica alle risorse Azure, non ai nomi dei computer o delle applicazioni dentro le VM.
 
-1. Nelle subscription interessate registrare i resource provider `Microsoft.Web`, `Microsoft.App`, `Microsoft.Network`, `Microsoft.Storage`, `Microsoft.ManagedIdentity`, `Microsoft.Insights` e `Microsoft.OperationalInsights` per l'hosting; `Microsoft.Compute`, `Microsoft.Network` e `Microsoft.KeyVault` per i workload DR. Un resource provider e il servizio Azure che gestisce quei tipi di risorse. Verificare disponibilita regionale di Flex Consumption/PowerShell 7.6 e quota compute per le VM DR.
-2. Storage, Function, VNet e Private Endpoint devono rispettare le policy applicabili. Lo storage deve supportare Blob/Queue/Table, TLS 1.2 e autenticazione Microsoft Entra; non occorrono Azure Files o storage key. Mantenere disabilitati accesso pubblico, accesso anonimo ai blob e shared key. Le impostazioni dell'account esistente restano responsabilita del suo gestore.
-3. La postazione deve raggiungere gli indirizzi privati di Function, del suo nome `scm` usato per pubblicare il codice, e dello storage. Deve risolvere quei nomi mediante le zone DNS create, avere connettivita alla VNet ed uscita HTTPS autorizzata per autenticazione Azure, Azure Resource Manager, registry Terraform e PowerShell Gallery. Il codice della Function chiama anche il management endpoint Azure; ingress privato non significa assenza di ogni uscita pubblica. Non e necessario peering al primario per leggere VM e dischi tramite il management endpoint.
-4. Tutte le risorse DR devono essere predisposte nella regione del DES: gruppi workload, VNet/subnet, ASG, Load Balancer/backend pool, Network Security Group (NSG), cioe regole di traffico delle subnet/NIC, e cifratura. I nomi devono rispettare `target_name_suffix`; i riferimenti devono essere leggibili dall'identita corretta. La subnet DR deve contenere gli IP sorgenti che il codice riutilizza, senza conflitti; nessun IP della bolla deve essere gia occupato da altre risorse.
-5. Il Key Vault DR deve avere soft delete e purge protection, cioe recupero delle eliminazioni e protezione dalla cancellazione definitiva, con chiave abilitata/non scaduta. L'identita del DES, distinta dalle due UAMI della Function, deve avere Key Vault Crypto Service Encryption User sulla subscription del vault quando si usa RBAC, oppure le autorizzazioni `get`, `wrapKey`, `unwrapKey` sulla chiave se si usano access policy. Il DES deve poter raggiungere il vault secondo la configurazione supportata, compreso il trusted-services bypass richiesto quando il firewall lo limita. Questi permessi non si assegnano a UAMI2 per sostituire l'identita del DES.
-6. Verificare dischi gestiti, DES del disco OS, tag/nome delle risorse, disponibilita dello SKU VM (Stock Keeping Unit, cioe il modello e dimensionamento Azure), compatibilita della generazione VM e del disk controller, presenza della NIC/IP configuration primaria e spazio IP nelle subnet DR. La copia snapshot di dischi cifrati deve essere provata con le stesse identita e policy effettive prima di un'attivazione operativa.
-7. Sulla postazione installare Git, Terraform 1.9 o successivo, Azure CLI e PowerShell 7.6. La configurazione verificata usa il provider AzureRM del file di lock e i moduli indicati in `function-app/requirements.psd1`; non aggiornarli implicitamente durante il deployment. La build scarica e include i moduli, non dipende da un download automatico al cold start.
+| Quale risorsa o riferimento considerare | Nome o valore sorgente di esempio | Nome o valore DR di esempio | Quale regola applica il codice |
+|---|---|---|---|
+| Resource Group della VM. | `rg-site-a-vm` | `rg-site-a-vm-DR` | Gruppo sorgente + `TARGET_RESOURCE_GROUP_SUFFIX`; deve esistere. |
+| Resource Group della VNet. | `rg-site-a-network` | `rg-site-a-network-DR` | Gruppo della VNet sorgente + `TARGET_VNET_RG_SUFFIX`; deve esistere. |
+| VNet. | `vnet-site-a` | `vnet-site-a-DR` | Nome sorgente + `TARGET_VNET_NAME_SUFFIX`; deve esistere. |
+| Subnet. | `snet-web` | `snet-web` | Stesso nome, nella VNet DR; deve esistere. |
+| ASG. | `asg-web` | `asg-web-DR` | Nome sorgente + `TARGET_ASG_NAME_SUFFIX`, nel gruppo della VNet DR. |
+| Resource Group del Load Balancer. | `rg-site-a-network` | `rg-site-a-network-DR` | Gruppo del pool sorgente + `TARGET_LB_RG_SUFFIX`; deve esistere. |
+| Load Balancer. | `lb-web` | `lb-web-DR` | Nome sorgente + `TARGET_LB_NAME_SUFFIX`; deve esistere. |
+| Backend pool. | `backendpool-web` | `backendpool-web` | Esempio di corrispondenza per nome; il pool deve esistere. Nessun suffisso automatico; valgono override/fallback descritti sopra. |
+| Frontend IP configuration del Load Balancer. | `frontend-private` | `frontend-private` | Solo esempio di predisposizione: il nome non e calcolato, copiato o verificato dalla Function. |
+| Health probe del Load Balancer. | `probe-https` | `probe-https` | Solo esempio di predisposizione: nome e configurazione sono responsabilita del gestore. |
+| Regola del Load Balancer. | `rule-https` | `rule-https` | Solo esempio di predisposizione: la Function non replica regole o porte. |
+| NSG. | `nsg-web` | `nsg-web-DR` | Solo esempio organizzativo: il codice non deriva questo nome e non copia l'NSG della NIC. |
+| Route table. | `rt-web` | `rt-web-DR` | Solo esempio organizzativo: il codice non deriva o copia route table e rotte. |
+| Resource Group del DES. | `rg-site-a-security` | `rg-site-a-security-DR` | Gruppo del DES OS sorgente + `TARGET_DES_RG_SUFFIX`; deve esistere. |
+| DES. | `des-vm` | `des-vm-DR` | Nome del DES OS sorgente + `TARGET_DES_NAME_SUFFIX`; deve esistere. |
+| Key Vault del DES. | `kv-site-a` | `kv-site-a-dr` | Solo esempio: il codice usa il DES DR gia configurato, non calcola o crea il vault. |
+| Chiave di cifratura. | `disk-key` | `disk-key` | Solo esempio: nome/versione della chiave sono configurati sul DES DR; non vengono copiati dalla Function. |
+| Virtual Machine. | `vm-web-01` | `vm-web-01` | Stesso nome, nel Resource Group DR; nessun `-DR` sulla VM. |
+| Disco OS. | `vm-web-01-os` | `vm-web-01-os` | Stesso nome, nel gruppo della VM DR, anche se il disco sorgente era in un altro gruppo. |
+| Disco dati, LUN 0. | `vm-web-01-data0` | `vm-web-01-data0` | Stesso nome nel gruppo DR; LUN e caching sono preservati al collegamento. |
+| Snapshot del disco OS. | Disco `vm-web-01-os`; non uno snapshot sorgente. | `snap-vm-web-01-os` | `SNAPSHOT_NAME_PREFIX` + nome del disco sorgente, nel gruppo della VM DR. |
+| Snapshot del disco dati. | Disco `vm-web-01-data0`; non uno snapshot sorgente. | `snap-vm-web-01-data0` | Stessa regola dello snapshot OS. |
+| NIC primaria. | `nic-web-primary` | `vm-web-01-nic` | Nome della VM + `-nic`, non nome NIC sorgente + `-DR`. |
+| IP configuration primaria della NIC. | `ipconfig1` | `ipconfig1` | Stesso nome, nella nuova NIC DR. |
+| IP privato. | `10.90.1.10` | `10.90.1.10`, statico. | Stesso indirizzo; deve appartenere alla subnet DR ed essere libero. |
 
-Le assegnazioni RBAC devono essere effettive prima del test; una scrittura riuscita dell'assegnazione non prova che il runtime sia gia autorizzato. Verificare una richiesta reale e non aggirare la propagazione modificando firewall o scegliendo un'altra identita. Per il deployment e i primi controlli, seguire i comandi sotto; la prima POST valida modifica risorse DR e deve essere autorizzata dal gestore della bolla.
+Gli esempi organizzativi non introducono requisiti di nome nel codice: frontend, probe, regole, NSG, route table, Key Vault e chiave possono avere altri nomi se la configurazione DR e coerente. Public IP, altre NIC/IP, identita VM ed estensioni non hanno un naming DR derivato dalla Function: non vengono ricopiati esplicitamente.
 
-## Che cosa crea Terraform e che cosa conserva
+**Attenzione alle collisioni:** gruppi distinti ma nomi VM uguali restano indistinguibili per l'API di stato, che usa il solo nome VM nel percorso dei log. I nomi degli snapshot sono stabili tra attivazioni: `snap-vm-web-01-os` gia esistente puo essere riusato, non rappresenta automaticamente una nuova copia dei dati.
 
-Terraform legge Resource Group, Storage Account e UAMI esistenti. Crea piano Linux Flex Consumption, Function App privata, VNet, subnet di integrazione, subnet per Private Endpoint, container `app-package`, `dr-configs`, `dr-logs`, Log Analytics workspace e Application Insights con diagnostica.
+### Esempi dei nomi dell'hosting Terraform
 
-Un Private Endpoint e un indirizzo privato per raggiungere un servizio. Sono previsti un endpoint della Function e tre endpoint storage per Blob, Queue e Table, con zone DNS private e collegamenti alla VNet. La VNet Integration riguarda l'uscita dalla Function; il suo Private Endpoint riguarda l'ingresso. L'accesso pubblico della Function e disabilitato.
+L'hosting non e un clone del primario e non segue il suffisso DR delle VM. Il nome della Function si imposta in `function_app_name`; gli altri nomi sono personalizzabili nel blocco `resource_names` del tfvars. Le chiavi omesse conservano i default precedenti. La tabella mostra i default con `function_app_name=func-bolla-example`, non una naming convention obbligatoria del cliente.
 
-La subnet di integrazione usa una delega `Microsoft.App/environments` ed e almeno /27 per questa singola app. Gli indirizzi devono essere scelti senza sovrapposizioni con le reti esistenti. I default sono esempi, non indirizzi gia riservati al proprio ambiente. Terraform non altera firewall, identita o account storage esistenti per aggirare un errore.
+Le Private DNS zone sono un'eccezione tecnica: i quattro nomi `privatelink.*` identificano i domini dei servizi Azure public cloud e vengono validati. Cambiarli per una naming convention aziendale romperebbe la risoluzione standard di questa configurazione. Sono invece liberi, nei limiti Azure, i nomi di endpoint, link, connessioni e zone group. Non cambiano i nomi degli endpoint API o i nomi DR calcolati dal codice.
 
-## Come configurare e creare il nuovo hosting
+| Quale risorsa di hosting considerare | Nome nell'esempio | Da quale input o regola deriva |
+|---|---|---|
+| Subscription hosting. | `sub-bolla-hosting` | ID fornito in `hosting_subscription_id`; nessun naming derivato. |
+| Resource Group hosting. | `rg-bolla-hosting` | Esistente, fornito in `resource_group_name`. |
+| Storage Account. | `stbollahostexample` | Esistente, fornito in `storage_account_name`; non rinominato. |
+| UAMI sorgente/storage e UAMI DR. | `id-bolla-source`, `id-bolla-dr` | Esistenti, fornite in `source_identity_name` e `target_identity_name`. |
+| Function App. | `func-bolla-example` | `function_app_name`. |
+| Piano Flex Consumption. | `func-bolla-example-plan` | `resource_names.service_plan`; default nome Function + `-plan`. |
+| VNet hosting. | `func-bolla-example-vnet` | `resource_names.virtual_network`; default nome Function + `-vnet`. |
+| Subnet di integrazione. | `function-integration` | `resource_names.integration_subnet`. |
+| Delega della subnet di integrazione. | `flex-consumption` | `resource_names.integration_subnet_delegation`; il tipo di servizio delegato resta obbligatorio. |
+| Subnet dei Private Endpoint. | `private-endpoints` | `resource_names.private_endpoints_subnet`. |
+| Private Endpoint Function. | `func-bolla-example-endpoint` | `resource_names.function_private_endpoint`. |
+| Private Endpoint Blob, Queue e Table. | `func-bolla-example-storage-blob`, `func-bolla-example-storage-queue`, `func-bolla-example-storage-table` | `resource_names.storage_private_endpoint_blob`, `_queue`, `_table`. |
+| Private DNS zone Function. | `privatelink.azurewebsites.net` | `resource_names.function_private_dns_zone`; valore tecnico validato. |
+| Private DNS zone Blob, Queue e Table. | `privatelink.blob.core.windows.net`, `privatelink.queue.core.windows.net`, `privatelink.table.core.windows.net` | `resource_names.storage_private_dns_zone_blob`, `_queue`, `_table`; valori tecnici validati. |
+| Link delle quattro zone DNS alla VNet. | `hosting-network` | `resource_names.function_private_dns_link` e `storage_private_dns_link_blob`, `_queue`, `_table`; link distinti dentro ogni zona. |
+| Connessione privata Function. | `function` | `resource_names.function_private_service_connection`. |
+| Connessioni private storage. | `storage-blob`, `storage-queue`, `storage-table` | `resource_names.storage_private_service_connection_blob`, `_queue`, `_table`. |
+| Zone group del Private Endpoint Function. | `function` | `resource_names.function_private_dns_zone_group`. |
+| Zone group dei Private Endpoint storage. | `storage` | `resource_names.storage_private_dns_zone_group_blob`, `_queue`, `_table`. |
+| Container deployment, CSV e log. | `app-package`, `dr-configs`, `dr-logs` | `resource_names.deployment_container`, `csv_container`, `log_container`; nomi distinti propagati a deployment, app settings e output. |
+| Application Insights. | `func-bolla-example-insights` | `resource_names.application_insights`. |
+| Log Analytics workspace. | `func-bolla-example-logs` | `resource_names.log_analytics_workspace`. |
+| Diagnostic setting Function. | `func-bolla-example-diagnostics` | `resource_names.function_diagnostic_setting`. |
+| Diagnostic setting Blob, Queue e Table. | `func-bolla-example-blob-diagnostics`, `func-bolla-example-queue-diagnostics`, `func-bolla-example-table-diagnostics` | `resource_names.storage_diagnostic_setting_blob`, `_queue`, `_table`. |
 
-Usare Terraform 1.9 o successivo, Azure CLI (`az`), PowerShell 7.6 e una postazione con il percorso privato necessario. L'operatore deve poter creare le nuove risorse, collegare le identita, creare i container e diagnostic settings e pubblicare il codice. Per caricare CSV serve anche il ruolo dati Blob appropriato; i permessi dell'operatore sono distinti dai ruoli delle UAMI.
+Gli eventuali Resource Group separati di storage/UAMI sono input esistenti, non nomi costruiti: `storage_resource_group_name`, `source_identity_resource_group_name`, `target_identity_resource_group_name`. Non aggiungere `-DR` a queste risorse per farle individuare dalla Function.
 
-1. Scaricare il progetto e aprire PowerShell nella sua cartella.
+Tutte le chiavi complete sono in [terraform/terraform.tfvars.example](terraform/terraform.tfvars.example). Si possono impostare solo quelle necessarie; chiavi sconosciute, nomi vuoti/null, container non validi o duplicati vengono respinti. Il nome della Function e globale; ogni altro nome deve rispettare caratteri, lunghezza e ambito di unicita Azure. Le chiavi `for_each` restano stabili anche con nomi personalizzati.
 
-   ```powershell
-   git clone https://github.com/lupass93/attivazione-dr-bolla.git
-   Set-Location attivazione-dr-bolla
-   Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
-   ```
+**Ambienti gia distribuiti:** omettere `resource_names` conserva i nomi originali. Cambiare un nome Azure puo richiedere sostituzione della risorsa e interrompere il servizio; esaminare il piano e autorizzare la migrazione prima di applicarlo. Non usare l'esempio con nomi cliente fittizi come aggiornamento automatico di un ambiente esistente.
 
-   Il clone scarica il codice. La copia prepara il file locale con i valori dell'ambiente; non modificarli dentro `main.tf`.
+## Responsabilita della Function sulle risorse DR
 
-2. Compilare `terraform/terraform.tfvars` con subscription, nomi delle risorse esistenti, identita, nome univoco della Function e indirizzi di rete. `variables.tf` descrive ogni input. Se storage o UAMI sono in altri Resource Group, compilare anche i rispettivi input facoltativi. Non usare i valori fittizi dell'esempio per il deployment.
+Il codice cerca le risorse nella subscription DR selezionata e nel Resource Group atteso. **Riuso significa continuare con un oggetto esistente dopo i soli controlli sotto**, non aggiornarlo allo stato del primario o certificarne la salute.
 
-3. Autenticarsi, inizializzare e validare Terraform.
+| Quale risorsa considera | In quali condizioni la riusa | Come usa o modifica la risorsa esistente | Cosa fa se manca o non corrisponde |
+|---|---|---|---|
+| Snapshot, stage B. | Trova `<prefisso-snapshot><nome-disco>` nel gruppo DR della VM. Devono coincidere `CreationData.SourceResourceId` con l'ID del disco primario ed `Encryption.DiskEncryptionSetId` con l'ID del DES DR. | Restituisce l'ID dello snapshot con stato interno `Reused`; lo usa come sorgente dei dischi nello stage C. Non crea una nuova copia, non aggiorna lo snapshot e non controlla la sua eta. | Se non trovato, crea lo snapshot con `CreateOption=Copy` e DES DR. Se sorgente o DES differiscono, genera errore; non sovrascrive o elimina quello esistente. |
+| Dischi OS e dati, stage C. | Trova il nome del disco sorgente nel gruppo DR della VM. Devono coincidere ID dello snapshot selezionato, `Sku.Name`, ID DES, insieme delle zone e valore numerico `MaxShares`, numero di VM che possono condividere il disco. | Conserva oggetto e ID nel gruppo dei dischi DR. Se crea una nuova VM li collega con caching e LUN, indice del disco dati. Non ricopia dati dal primario e non riallinea proprieta o collegamenti di una VM gia esistente. | Se non trovato, crea dal relativo snapshot con DES/SKU; tier, zone e condivisione sono applicati se supportati. Un confronto fallito genera errore, senza sostituzione o detach automatico. |
+| NIC e IP privato, stage D. | Trova `<nome-VM>-nic` nel gruppo DR. Seleziona la IP configuration col nome sorgente, altrimenti la prima. Devono coincidere ID subnet, allocazione `Static` e IP sorgente. Gli ASG sono confrontati solo se almeno un ASG DR e stato trovato; una differenza produce warning, non rifiuto. | Conserva NIC e configurazione IP senza correggere gli ASG, i tag o altre impostazioni. Ne usa l'ID per una nuova VM. Nello stage E puo aggiornare soltanto l'associazione al backend pool previsto. | Se non trovata, crea una NIC con IP sorgente statico e ASG DR trovati. Subnet, allocazione o IP diversi generano errore; ASG mancanti/discordanti possono invece lasciare proseguire il lavoro. |
+| Virtual Machine, stage D. | Trova il nome della VM sorgente nel gruppo DR. Controlla soltanto `HardwareProfile.VmSize` e l'ID del managed disk OS, che deve essere quello selezionato nello stage C. | Mantiene la VM senza riconfigurare dischi dati, NIC, tag, identita o boot diagnostics. Non la avvia se e spenta e non controlla provisioning, guest o applicazione. Prosegue verso lo stage E. | Se non trovata, crea con NIC/dischi DR, caching/LUN, nome/dimensione sorgenti, tag e boot diagnostics. Size o disco OS discordanti generano errore; nessuna sostituzione automatica. |
+| Associazione NIC/backend pool, stage E. | Se la sorgente usa un Load Balancer, trova Load Balancer/pool DR secondo la selezione descritta sopra. Nella IP configuration col nome sorgente, altrimenti la prima, cerca l'ID del pool tra quelli gia associati. | Se l'ID e gia presente, registra `BackendPoolAlreadyMember` e non aggiorna la NIC. Altrimenti aggiunge il pool ai collegamenti esistenti, salva la NIC e rilegge per verificare la presenza dell'ID. Non crea il pool e non rimuove gli altri pool. | Pool/LB mancanti o selezione ambigua generano errore. Senza LB sorgente salta lo stage di associazione; non rimuove eventuali pool gia presenti sulla NIC riusata. |
 
-   ```powershell
-   az login
-   terraform -chdir=terraform init
-   terraform -chdir=terraform validate
-   terraform -chdir=terraform plan -out=deployment.tfplan
-   ```
+Gli ID e le stringhe dei confronti vengono normalizzati per spazi e maiuscole/minuscole; zone e ASG sono confrontati come insiemi, ignorando ordine e duplicati. Non e un confronto completo del modello Azure.
 
-   Il login autentica l'operatore. `init` prepara il provider nella versione del file di lock; `validate` verifica la configurazione. `plan` mostra le operazioni e salva il piano. Verificare che non proponga sostituzione o cancellazione delle risorse preesistenti. I piani e lo stato possono contenere informazioni sensibili e non vanno pubblicati.
+- **Prerequisiti:** Resource Group, VNet/subnet, ASG, Load Balancer/pool e DES devono esistere e sono usati tramite nomi/ID risolti. Regole/probe e Key Vault/chiave restano configurazioni esterne, non risorse create o riconciliate dalla Function.
+- **Esiti e risorse parziali:** scrive log per stage e marker finale. Un errore blocca quella replica, ma non esegue rollback delle risorse gia create; altre righe del CSV possono proseguire.
+- **Ripetere non significa aggiornare:** un nuovo `invocationId` puo riusare lo stesso snapshot e gli stessi dischi/VM. Non rinnova i dati del ripristino, e i nuovi dischi creati nello stage C non vengono automaticamente collegati a una VM riusata.
 
-4. Applicare solo il piano esaminato.
+I controlli sono in [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1#L621), nei rami degli stage B-E. `Get-DRStatus` interpreta i log: non crea, corregge o verifica direttamente queste risorse e non distingue una ricostruzione nuova da un riuso sulla base del solo marker di successo.
 
-   ```powershell
-   terraform -chdir=terraform apply deployment.tfplan
-   terraform -chdir=terraform output
-   ```
+## Come opera Invoke-DRReplication
 
-   `apply` crea le risorse nuove e puo generare costi. Gli output mostrano i riferimenti operativi, non le function key. Un secondo `terraform plan` deve risultare senza modifiche inattese.
+`POST /api/Invoke-DRReplication`, autorizzata da function key, riceve `csvBlobPath` nel body JavaScript Object Notation (JSON), formato strutturato della richiesta. Non riceve il CSV direttamente e non predispone i prerequisiti DR. I nomi degli endpoint sono quelli dei relativi [binding](function-app/Invoke-DRReplication/function.json).
 
-## Come creare il pacchetto e pubblicare il codice
+| Quale passaggio esegue | Quale operazione compie nel codice attuale |
+|---|---|
+| 1. Legge richiesta e configurazione. | Richiede `csvBlobPath`, parallelismo VM effettivo 1 e suffissi dalle app settings. Parametro mancante/nessuna riga valida: 400; CSV non trovato: 404. |
+| 2. Scarica e valida il CSV con UAMI1. | Legge il container CSV configurato, default `dr-configs`, verifica le tre colonne e scarta righe incomplete con warning. Nessun preflight completo o controllo duplicati. |
+| 3. Avvia il lavoro per riga. | Usa un `invocationId` comune, VM sequenziali, UAMI1 nella subscription sorgente della riga e UAMI2 nella DR globale. |
+| 4. Stage A: scopre la sorgente. | Legge VM, NIC/IP primari, ASG, pool, dischi OS/dati e DES OS; deriva nomi/gruppi DR. Non congela le scritture applicative. |
+| 5. Stage B: snapshot. | UAMI2 copia ogni disco primario in uno snapshot con DES DR, o riusa quello con sorgente/DES corrispondenti. Serve autorizzazione sulla sorgente alla stessa UAMI2. |
+| 6. Stage C: dischi. | Crea managed disk dagli snapshot. Per il riuso confronta snapshot, SKU, DES, zone e condivisione, non tutte le proprieta. |
+| 7. Stage D: NIC e VM. | Usa subnet/ASG DR, IP statico sorgente, dischi/caching/LUN, nome e dimensione VM sorgenti. Il riuso VM controlla solo dimensione e ID disco OS. |
+| 8. Stage E: backend pool. | Se la sorgente ha un Load Balancer, seleziona un pool DR esistente, aggiorna la NIC e verifica l'associazione; altrimenti salta questo collegamento. |
+| 9. Registra l'esito. | Scrive log per stage e marker `Completed` o fallimento. Errori per VM possono lasciare risorse parziali; la POST non restituisce gli esiti dettagliati delle VM. |
+
+**Non e un job asincrono persistente:** `Push-OutputBinding` prepara il 202, ma lo script prosegue nella stessa invocazione e risponde quando termina. I commenti di risposta immediata sono inesatti. Il 202 non certifica tutte le VM; dopo un timeout l'esecuzione potrebbe essere ancora attiva.
+
+Fonti del comportamento: [handler HTTP](function-app/Invoke-DRReplication/run.ps1) e [stage A-E in DRCore](function-app/Modules/DRCore/DRCore.psm1).
+
+## Come opera Get-DRStatus
+
+`GET /api/Get-DRStatus?csvBlobPath=...` oppure POST con lo stesso parametro nel body JSON, autorizzate da function key. Usa solo UAMI1 per leggere storage; non chiama UAMI2 per controllare o modificare il DR.
+
+1. Verifica il percorso e scarica il CSV dal container configurato, default `dr-configs`; parametro assente produce 400, CSV non trovato produce 404.
+2. Per ogni `SourceVmName` elenca i blob sotto `<container-log>/<nome-VM>/`, default `dr-logs/<nome-VM>/`. Non usa subscription e Resource Group per distinguere VM omonime.
+3. Estrae gli `invocationId` dai nomi dei log e sceglie, separatamente per VM, quello con il blob modificato piu recentemente. Non filtra per l'ID della POST richiesta dall'operatore.
+4. Interpreta i marker del gruppo selezionato secondo la tabella sotto; un errore di lettura di una VM diventa `ERROR` e le altre possono essere controllate.
+5. Restituisce `checkedAt`, `vmCount`, `results` e conteggi in `summary`. Un HTTP 200 significa che la richiesta di stato e stata elaborata, non che tutte le VM siano riuscite.
+
+| Quale stato restituisce | Quale evidenza lo determina |
+|---|---|
+| `SUCCEEDED` | Esiste un marker `stageCompleted-` non fallito; `completedStage` vale `Completed`. Non verifica provisioning, avvio o salute applicativa. |
+| `FAILED` | Non c'e il marker di successo ed esiste un log `-failed.log`; restituisce `failedStage`. Le risorse parziali possono essere ancora presenti. |
+| `IN_PROGRESS` | Non c'e ne marker finale ne errore registrato; `lastCompletedStage` indica l'ultimo stage trovato. Non prova che un processo sia ancora attivo. |
+| `UNKNOWN` | Non esistono log o il loro formato non e riconosciuto. |
+| `ERROR` | La lettura/interpretazione dei log di quella VM genera un errore. |
+
+La risposta e una vista dei log, non un inventario Azure o uno stato autorevole di un job. Un CSV modificato, VM omonime o scritture tardive possono alterare il risultato mostrato. Non certifica Recovery Point Objective (RPO), perdita dati massima ammessa, o Recovery Time Objective (RTO), tempo massimo di ripristino.
+
+Fonti del comportamento: [binding GET/POST](function-app/Get-DRStatus/function.json) e [handler di lettura dello stato](function-app/Get-DRStatus/run.ps1).
+
+## Pre-check prima del deployment
+
+Completare questi controlli prima di applicare Terraform; quelli sui nuovi endpoint si confermano dopo l'apply e prima del deploy del codice.
+
+- [ ] **Risorse e identita:** confermare subscription di hosting, primarie e DR configurata, Resource Group, Storage Account e nomi/client ID/principal ID delle due UAMI. Le subscription coinvolte devono appartenere allo stesso tenant Microsoft Entra ID. I role assignment vanno sull'identita corretta, usando il principal ID; non confondere le due UAMI.
+- [ ] **Permessi:** verificare le matrici sotto, gli scope effettivi e la propagazione delle assegnazioni. Controllare anche Azure Policy, deny assignment e resource lock; un ruolo assegnato non supera un divieto della piattaforma.
+- [ ] **Storage:** verificare un account StorageV2 che supporti Blob/Queue/Table, TLS 1.2, accesso pubblico/anonimo e shared key disabilitati. Per UAMI1 verificare Blob Data Owner per l'host e Table Data Contributor per la diagnostica host. Queue Data Contributor e suggerito per possibili evoluzioni, non un requisito bloccante dei due trigger HTTP attuali; il supporto del servizio nell'account non prova che la Function lo utilizzi.
+- [ ] **Rete e postazione:** predisporre connettivita e DNS verso la nuova VNet. Dopo l'apply verificare Function, nome `scm` di pubblicazione e storage sui rispettivi IP privati. Consentire HTTPS verso autenticazione/management Azure, Terraform Registry e PowerShell Gallery. La sola autenticazione Azure non fornisce accesso privato.
+- [ ] **Bolla DR e cifratura:** verificare nomi coerenti con `target_name_suffix`, subnet con gli IP sorgenti liberi, ASG e pool esistenti. DES, VM/dischi/snapshot DR devono essere compatibili per regione/subscription; Key Vault con soft delete e purge protection, chiave attiva e identita DES autorizzata a usarla. Con RBAC usare Key Vault Crypto Service Encryption User sulla chiave/vault, oppure access policy `get`, `wrapKey`, `unwrapKey`. Verificare firewall/trusted services del vault; l'identita DES e distinta dalle UAMI della Function.
+- [ ] **Strumenti e disponibilita:** installare Git, Terraform >= 1.9, Azure CLI e PowerShell 7.6. Verificare quota/modello VM in DR e disponibilita regionale di Flex Consumption. Registrare i provider hosting `Microsoft.Web`, `Microsoft.App`, `Microsoft.Network`, `Microsoft.Storage`, `Microsoft.ManagedIdentity`, `Microsoft.Insights`, `Microsoft.OperationalInsights`; per DR, `Microsoft.Compute`, `Microsoft.Network`, `Microsoft.KeyVault`.
+
+Per un pre-check tracciabile, annotare **identita, ruolo, scope e risultato**. Se manca un controllo, risolverlo prima della fase che ne dipende; non aprire gli endpoint pubblici come workaround.
+
+## Autenticazione e permessi
+
+Role-Based Access Control (RBAC) autorizza le operazioni Azure. Lo **scope** e l'ambito del role assignment; un ruolo sul Resource Group si eredita sulle sue risorse. Le matrici distinguono il ruolo necessario e l'alternativa di scope ammessa, evitando assegnazioni subscription per storage e monitoraggio quando non servono.
+
+### UAMI sorgente/storage
+
+| Quale ruolo verificare | Quale scope usare | Per quale operazione serve |
+|---|---|---|
+| Storage Blob Data Owner | **Storage Account esistente**; in alternativa il Resource Group che lo contiene. | Ruolo minimo built-in documentato da Microsoft per `AzureWebJobsStorage`, la connessione interna dell'host. Copre anche il pacchetto e i blob del codice. |
+| Storage Table Data Contributor | **Lo stesso Storage Account**; in alternativa il suo Resource Group. | Eventi diagnostici dell'host, anche quando l'app non parte. Non e una dipendenza del codice che legge CSV o scrive log Blob. |
+| Storage Queue Data Contributor, suggerito e non bloccante | **Lo stesso Storage Account**; in alternativa il suo Resource Group. | Da predisporre se concordato per evoluzioni che usino Queue, Blob trigger o Durable Functions. Non richiesto dalle operazioni HTTP attuali. |
+| Reader | Ogni subscription primaria e ogni subscription contenente risorse sorgenti referenziate. | Lettura di VM, dischi, NIC, rete e riferimenti di cifratura. |
+| Monitoring Metrics Publisher | **Risorsa Application Insights**; in alternativa il Resource Group che la contiene. | Invio della telemetria autenticata della Function; il ruolo pubblica anche tracce ed eccezioni, non solo metriche. |
+| Reader, solo se l'identita deve consultare Application Insights | **Risorsa Application Insights**; in alternativa il suo Resource Group. | Lettura del monitoraggio, non invio della telemetria. |
+| Reader, solo se l'identita deve interrogare il workspace | **Risorsa Log Analytics workspace**; in alternativa il suo Resource Group. | Query dei log consentiti; verificare modalita di accesso del workspace ed eventuali restrizioni sulle tabelle. |
+
+**Perche Owner:** CSV/log Blob richiedono al massimo Blob Data Contributor, che puo creare container. UAMI1 usa pero anche `AzureWebJobsStorage`: Owner e il requisito built-in documentato per l'host e copre gia quelle operazioni. Non aggiungere Contributor allo stesso scope. Owner include controlli POSIX sui permessi file/directory, ma il codice non li modifica; non e stata provata un'operazione esclusiva di Owner o l'impossibilita di usare Contributor in ogni esecuzione.
+
+**Quando serve Queue:** per Blob trigger con poison/retry, binding/codice Queue o Durable Functions con provider Azure Storage; il ruolo minimo dipende dall'operazione e puo essere piu stretto di Contributor. Sono casi assenti dai due HTTP trigger attuali. Queue Data Contributor resta suggerito per evoluzioni, non least privilege del runtime: concede gia accesso ai dati. Endpoint/URI presenti in Terraform non provano un uso del servizio; una futura evoluzione richiede revisione di codice, ruoli e rete.
+
+**File share:** Flex Consumption distribuisce il codice dal container Blob e qui non sono configurati mount Azure Files. Non serve un file share o un ruolo Azure Files. Un eventuale mount futuro e opzionale e avrebbe propri prerequisiti.
+
+**Monitoraggio:** Monitoring Metrics Publisher va su Application Insights per l'ingestion; i Reader sono condizionali alla consultazione. Il workspace non sostituisce lo scope Application Insights e non richiede un ruolo di scrittura alla UAMI per questa configurazione.
+
+Application Insights e workspace sono creati da Terraform. Se non esistono ancora, il pre-check puo verificare l'assegnazione sul **Resource Group di hosting gia esistente**; altrimenti predisporre l'assegnazione sulla nuova risorsa subito dopo l'apply e **prima del deploy del codice**. Il gestore RBAC deve essere disponibile per questo passaggio.
+
+### UAMI destinazione/DR
+
+| Quale ruolo verificare | Quale scope usare | Per quale operazione serve |
+|---|---|---|
+| Reader | Subscription DR e subscription contenenti prerequisiti DR referenziati. | Lettura di rete, DES, Load Balancer e gruppi di destinazione. |
+| Virtual Machine Contributor | Subscription DR. | Creazione e gestione di VM e dischi DR. |
+| Disk Snapshot Contributor | Subscription DR. | Creazione e gestione degli snapshot DR. |
+| Network Contributor | Subscription DR e subscription della rete DR, se diversa. | NIC e collegamenti a subnet, ASG e backend pool. |
+| Disk Backup Reader | Ogni subscription primaria contenente i dischi da copiare. | Accesso ai dischi sorgenti necessario alla copia dello snapshot. |
+
+I permessi delle due identita **non si sommano**: la UAMI DR deve avere `Microsoft.Compute/disks/beginGetAccess/action` sulla sorgente, incluso in Disk Backup Reader. Reader da solo non basta. Gli scope subscription DR/primario restano quelli concordati; autorizzano anche risorse estranee alla bolla e devono essere approvati dal gestore.
+
+Il requisito tecnico riguarda i permessi sui dischi sorgenti: Disk Backup Reader puo essere assegnato anche ai soli dischi o ai Resource Group che li contengono. Non aggiungerlo se UAMI2 ha gia permessi equivalenti. L'ambito subscription e una scelta operativa piu ampia, non un requisito della copia. Lo stesso principio vale per Monitoring Metrics Publisher o permessi equivalenti sulla risorsa Application Insights, non sul solo workspace.
+
+### Operatore di deployment
+
+| Quale ruolo verificare | Quale scope usare | Per quale operazione serve |
+|---|---|---|
+| Contributor | Subscription di hosting; subscription dello storage, se si verificano risorse in altri ambienti. | Terraform, rete/DNS/diagnostica, pubblicazione codice e recupero delle function key. |
+| Managed Identity Operator, solo se non gia coperto | Scope delle UAMI, secondo le assegnazioni concordate. | Serve se mancano lettura e assegnazione delle identita alla Function. Non aggiungerlo quando Contributor copre gia le UAMI e queste operazioni. |
+| Storage Blob Data Contributor | Subscription dello storage, come previsto per l'operatore. | Upload dei CSV con autenticazione Azure; Contributor non concede da solo i permessi dati Blob. |
+| Reader, solo per chi verifica le risorse | Subscription primarie e DR. | Inventario finale; non e richiesto per il solo deployment dell'hosting e non autorizza un reset. |
+
+L'operatore e distinto dalle UAMI. Chi crea i role assignment deve avere Role Based Access Control Administrator, User Access Administrator o Owner negli scope interessati; questi privilegi non servono alla Function. Il reset DR richiede autorizzazione separata e non deve eliminare i prerequisiti.
+
+Gli scope subscription dell'operatore e della UAMI DR sono quelli operativi concordati, non un requisito intrinseco di Azure Functions. Contributor gestisce risorse ma non concede permessi dati Blob: l'upload con `--auth-mode login` richiede il ruolo dati della tabella.
+
+## Struttura del progetto
+
+```text
+terraform/        Configurazione AzureRM, variabili, output e file di lock.
+terraform/tests/  Test di naming con provider simulato, senza operazioni Azure.
+function-app/     Host, due funzioni HTTP, DRCore e dipendenze fissate.
+scripts/          build.ps1 e deploy.ps1.
+examples/vms.csv  Esempio fittizio della configurazione VM.
+out/             Pacchetto generato localmente, escluso da Git.
+```
+
+## Deployment della soluzione
+
+Eseguire i comandi in **PowerShell 7.6**, dalla postazione autorizzata con percorso privato. Non cambiare le versioni del provider o dei moduli durante il deployment.
+
+### 1. Scaricare e configurare
+
+```powershell
+git clone https://github.com/lupass93/attivazione-dr-bolla.git
+Set-Location attivazione-dr-bolla
+Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
+az login
+```
+
+[terraform/variables.tf](terraform/variables.tf) definisce gli input e non va compilato o modificato per il deployment. Compilare soltanto il file locale `terraform/terraform.tfvars`, copiato da [terraform/terraform.tfvars.example](terraform/terraform.tfvars.example); sostituire i valori fittizi e conservarlo localmente.
+
+| Quali input preparare | Quali valori inserire nel file tfvars |
+|---|---|
+| `hosting_subscription_id`, `dr_subscription_id` | ID delle subscription hosting e dell'unica DR attualmente configurabile; le subscription primarie sono indicate nel CSV. |
+| `resource_group_name`, `storage_account_name` | Nomi del Resource Group e dello Storage Account esistenti. |
+| `source_identity_name`, `target_identity_name` | Nomi delle due UAMI esistenti; Terraform ricava client ID e principal ID. |
+| `function_app_name` | Nome globale univoco della nuova Function. |
+| `resource_names` | Mappa degli override dei nomi risorsa/sotto-risorsa; copiare dall'esempio le sole chiavi richieste dalla naming convention cliente. Ometterla per mantenere tutti i default. |
+| `location`, `vnet_address_space`, `integration_subnet_prefix`, `private_endpoints_subnet_prefix` | Regione concordata e rete/subnet non sovrapposte. Non riutilizzare i prefissi di esempio senza verifica. |
+| `storage_resource_group_name`, `source_identity_resource_group_name`, `target_identity_resource_group_name` | Solo quando le rispettive risorse non sono nel RG di hosting; altrimenti omettere. |
+| `target_name_suffix`, `maximum_instance_count`, `instance_memory_in_mb`, `log_retention_days` | Confermare i default: `-DR`, 10 istanze, 2048 MB e 30 giorni; cambiare solo se necessario e concordato. |
+
+Non esistono altri file di variabili da compilare. Non pubblicare tfvars, stato, piani o CSV reali. Regione/rete/nomi e prerequisiti devono essere disponibili prima dell'attivita.
+
+### 2. Creare l'infrastruttura
+
+```powershell
+terraform -chdir=terraform init
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=deployment.tfplan
+terraform -chdir=terraform apply deployment.tfplan
+terraform -chdir=terraform output
+```
+
+Prima di `apply`, esaminare il piano: nessuna creazione/sostituzione di RG, Storage Account o UAMI esistenti. L'apply genera costi. Dopo l'apply verificare DNS/endpoint privati e ruolo telemetria sul nuovo Application Insights; un piano successivo non deve avere modifiche inattese. Stato e piani possono contenere chiavi lette dal provider: non pubblicarli.
+
+### 3. Creare e pubblicare il pacchetto
 
 ```powershell
 ./scripts/build.ps1
 ./scripts/deploy.ps1
 ```
 
-`build.ps1` scarica solo i moduli Azure mancanti nelle versioni fissate in `function-app/requirements.psd1`, elimina versioni aggiuntive nella cartella generata per evitare conflitti nei runspace e crea `out/function-app.zip` dopo la verifica sintattica. Il pacchetto ha `host.json` alla radice, permessi leggibili dal worker Linux e non contiene `local.settings.json`. Moduli e ZIP generati restano locali e sono ignorati da Git. Per una build con moduli gia disponibili si puo usare `-SkipModuleDownload`.
+La build scarica i moduli nelle versioni di `function-app/requirements.psd1` e crea `out/function-app.zip`, senza impostazioni locali. Il deploy legge gli output Terraform, rimuove l'eventuale `AzureWebJobsStorage` legacy per usare l'identita, pubblica il codice e verifica i due endpoint: **400 senza CSV e l'esito atteso**, non una replica avviata. Se uno script fallisce, correggere l'errore prima di proseguire. Non usare storage key, `WEBSITE_RUN_FROM_PACKAGE` o accesso pubblico come workaround.
 
-`deploy.ps1` legge destinazione e URL dagli output Terraform, seleziona host storage identity-based rimuovendo l'eventuale impostazione legacy `AzureWebJobsStorage`, pubblica lo ZIP e verifica entrambe le API con richieste prive di CSV. L'esito atteso e HTTP 400 per entrambe: dimostra che rispondono, senza avviare la replica. Il deploy richiede accesso al nome privato della Function e del suo servizio di pubblicazione. Non viene aperto l'accesso pubblico.
+## Configurazione del CSV
 
-Non usare `WEBSITE_RUN_FROM_PACKAGE`, storage key o un account diverso per superare errori su Flex Consumption. Non pubblicare durante una replica: una pubblicazione puo riavviare il processo. Conservare l'ultimo pacchetto verificato per ripubblicarlo, se necessario; questa operazione non ripristina le risorse DR.
+Comma-Separated Values (CSV) e un file di colonne separate da virgole. Usare `examples/vms.csv` come modello e compilare queste colonne:
 
-## Come preparare il CSV delle VM sorgenti
+| Quale colonna compilare | Quale valore inserire |
+|---|---|
+| SourceSubscription | Nome o ID della subscription primaria. |
+| SourceResourceGroup | Resource Group della VM sorgente. |
+| SourceVmName | Nome esatto della VM sorgente. |
 
-Comma-Separated Values (CSV) indica un file di righe e colonne separate da virgole. Copiare `examples/vms.csv` in un file locale e sostituire subscription, Resource Group e nome VM con i riferimenti reali. `SourceSubscription` puo essere l'ID o il nome della subscription primaria. La subscription DR viene invece scelta dall'input Terraform `dr_subscription_id`.
+La subscription DR viene da `dr_subscription_id`; `target_name_suffix`, default `-DR`, determina i nomi dei prerequisiti DR, non una destinazione subscription per riga. La regione della replica e quella del DES DR. VM e dischi mantengono i nomi sorgenti; gli IP privati vengono riutilizzati. Confermare nomi e IP prima dell'attivazione.
 
-I gruppi e i nomi dei prerequisiti DR vengono derivati dai nomi sorgenti con `target_name_suffix`, che per default vale `-DR`. VM e dischi mantengono il nome sorgente, NIC e snapshot seguono i nomi del codice. La regione della replica e quella del DES DR, non necessariamente la regione dell'hosting. Verificare questa convenzione prima della POST.
-
-Da PowerShell preparare i riferimenti del nuovo hosting:
+Nella cartella del repository, leggere gli output e caricare il CSV reale preparato localmente:
 
 ```powershell
 $Outputs = terraform -chdir=terraform output -json | ConvertFrom-Json
@@ -134,102 +357,109 @@ $ResourceGroup = $Outputs.resource_group_name.value
 $FunctionName = $Outputs.function_app_name.value
 $ApiUrl = $Outputs.api_url.value
 $StorageAccount = $Outputs.storage_account_name.value
-```
-
-Queste righe leggono i valori creati da Terraform. Non stampano credenziali e non avviano la bolla.
-
-Caricare il file locale sullo storage privato, ad esempio:
-
-```powershell
-az storage blob upload --account-name $StorageAccount --container-name dr-configs --name configurations/my-vms.csv --file ./my-vms.csv --auth-mode login --overwrite
+$CsvContainer = $Outputs.csv_container_name.value
 $CsvBlobPath = 'configurations/my-vms.csv'
+az storage blob upload --account-name $StorageAccount --container-name $CsvContainer --name $CsvBlobPath --file ./my-vms.csv --auth-mode login --overwrite
 ```
 
-Il comando autentica l'operatore con Azure CLI e carica il CSV nel container `dr-configs`. Sovrascrive quel blob se esiste. La variabile conserva il percorso remoto, non il contenuto del file. Non pubblicare il CSV reale nel repository.
+L'upload usa l'identita dell'operatore e sovrascrive solo quel blob. Non pubblicare il CSV reale o credenziali nel repository.
 
-## Come attivare la bolla con Invoke-DRReplication
+## Attivazione e verifica
 
-Application Programming Interface (API) indica l'interfaccia HTTP della Function. La function key e il segreto condiviso che Azure custodisce per autorizzare le chiamate; resta valido finche viene ruotato o revocato. Recuperarlo in memoria e non inserirlo nell'URL o negli screenshot:
+Le Application Programming Interface (API) sono gli endpoint HTTP della Function. La function key e un segreto condiviso: recuperarla in memoria e inviarla nell'header, non nell'URL.
+
+### Invoke-DRReplication
 
 ```powershell
 $FunctionKey = az functionapp keys list --subscription $Subscription --resource-group $ResourceGroup --name $FunctionName --query functionKeys.default -o tsv
 $Headers = @{ 'x-functions-key' = $FunctionKey }
-$RequestBody = @{ csvBlobPath = $CsvBlobPath } | ConvertTo-Json
-$Activation = Invoke-RestMethod -Method Post -Uri "$ApiUrl/Invoke-DRReplication" -Headers $Headers -ContentType 'application/json' -Body $RequestBody -TimeoutSec 300 -StatusCodeVariable ActivationCode
+$Body = @{ csvBlobPath = $CsvBlobPath } | ConvertTo-Json
+$Activation = Invoke-RestMethod -Method Post -Uri "$ApiUrl/Invoke-DRReplication" -Headers $Headers -ContentType 'application/json' -Body $Body -TimeoutSec 300 -StatusCodeVariable ActivationCode
 $ActivationCode
 $Activation | Format-List invocationId, vmCount, startedAt, message
 ```
 
-`ConvertTo-Json` genera il formato strutturato della richiesta senza escape manuali. La POST scarica il CSV e crea o riusa snapshot, dischi, NIC, VM e associazioni ai pool. La risposta ordinaria e HTTP 202 con il nuovo `invocationId`, identificatore di quella esecuzione condiviso da tutte le sue VM. Una nuova POST genera un nuovo ID anche con lo stesso CSV.
+La POST crea o riusa risorse DR. La risposta **202 arriva dopo l'elaborazione** e non prova il successo di ogni VM. Ogni chiamata genera un nuovo `invocationId`, condiviso dalle VM del suo CSV. Il parallelismo VM deve essere 1; iniziare con CSV piccoli e chiamate sequenziali.
 
-**Il 202 arriva a fine elaborazione nel codice attuale e non certifica il successo di tutte le VM.** Il frontend Azure puo perdere la risposta oltre circa 230 secondi, anche con timeout locale 300 e `functionTimeout=-1`, che elimina il limite di esecuzione. Non rilanciare automaticamente dopo un timeout: il processo puo essere ancora attivo. Usare inizialmente CSV piccoli e invocazioni sequenziali; `vmParallelThrottle` deve essere 1 nella configurazione con due identita.
-
-## Come leggere lo stato con Get-DRStatus
+### Get-DRStatus
 
 ```powershell
-$StatusUrl = "$ApiUrl/Get-DRStatus?csvBlobPath=$CsvBlobPath"
-$Status = Invoke-RestMethod -Method Get -Uri $StatusUrl -Headers $Headers
+$Status = Invoke-RestMethod -Method Get -Uri "$ApiUrl/Get-DRStatus?csvBlobPath=$CsvBlobPath" -Headers $Headers
 $Status.summary | Format-List
-$Status.results | Format-Table vmName, status, invocationId, lastCompletedStage, failedStage
+$Status.results | Format-Table vmName, status, invocationId, completedStage, lastCompletedStage, failedStage
 ```
 
-La GET legge il CSV e i log, senza creare risorse. `summary` conta successi, fallimenti, lavorazioni aperte, stati sconosciuti ed errori di lettura. `results` mostra l'esito per VM. Ripetere la GET per aggiornare; non ripetere la POST.
+La GET legge i log, non avvia la bolla. Per ogni VM seleziona l'esecuzione con il log modificato piu recentemente: **confrontare l'ID con `$Activation.invocationId`**; non esiste un filtro per ID. `SUCCEEDED` richiede il marker finale; `FAILED` indica uno stage fallito; `IN_PROGRESS` non prova che un processo interrotto sia ancora attivo; `UNKNOWN` significa log assenti/non riconoscibili; `ERROR` indica errore di lettura. Controllare anche VM, dischi, NIC e servizio applicativo.
 
-| Quale stato compare | Quale evidenza considera il codice |
+## Limiti e troubleshooting
+
+| Quale limite esiste oggi | Quale rischio comporta |
 |---|---|
-| SUCCEEDED | Esiste il log finale di successo per l'esecuzione selezionata. |
-| FAILED | Esiste un log dello stage fallito. Le risorse parziali non sono eliminate automaticamente. |
-| IN_PROGRESS | Ci sono log senza marker finale; non prova che il processo sia ancora attivo dopo un'interruzione. |
-| UNKNOWN | Non ci sono log riconoscibili. |
-| ERROR | La lettura dei log di quella VM ha incontrato un errore. |
+| Una sola subscription DR globale. | Non soddisfa primaria A -> A-DR e primaria B -> B-DR. Non usare il suffisso come se quel mapping fosse gia implementato. |
+| Elaborazione dentro la richiesta HTTP, senza job persistente. | Il frontend puo perdere la risposta oltre circa 230 secondi. `functionTimeout=-1` non elimina riavvii, scale-in o aggiornamenti della piattaforma; non garantisce un'esecuzione infinita. |
+| Nessun lock tra richieste o istanze. | `vmParallelThrottle=1` e `http_concurrency=1` limitano il lavoro locale, non escludono attivazioni sovrapposte sullo stesso workload. |
+| Snapshot e dischi riusati non sono aggiornati dal primario. | Sorgente/DES uguali non provano freschezza o integrita dei dati; nessun controllo di eta, provisioning o readiness dello snapshot. Per il disco non vengono confrontati dimensione, tier o attuale utilizzo/collegamento. Una nuova POST puo continuare con dati precedenti. |
+| Riuso VM limitato a size e disco OS. | Una VM spenta o con provisioning fallito puo superare questi controlli; NIC/dischi dati previsti, identita, tag e salute non vengono riconciliati. I dischi creati nello stage C possono restare non collegati alla VM riusata. |
+| Ricerca per nome senza verifica completa di appartenenza. | Il codice non richiede marcatori di proprieta del job o del workload per adottare risorse esistenti. Una NIC collegata ad altra VM o un disco in uso non sono respinti preventivamente dai controlli di riuso. |
+| Snapshot per disco senza coordinare le scritture. | Nessuna consistenza applicativa/multi-disco garantita, replica continua o RPO/RTO misurati. Nessuna pipeline cross-region implementata. |
+| Topologia e proprieta VM solo parzialmente ricostruite. | Una NIC e una IP configuration vengono ricreate; gli ASG trovati sulle configurazioni della NIC sorgente vengono raccolti sulla configurazione DR. NSG della NIC, altre NIC/IP, security profile, identita VM ed estensioni non sono ricopiati esplicitamente; zona VM e disk controller non sono impostati esplicitamente. |
+| NIC/pool non vengono riconciliati completamente. | Configurazione IP scelta per nome o prima disponibile; ASG discordanti non corretti e confronto saltato se nessun ASG DR e trovato. Aggiungere il pool desiderato conserva quelli precedenti; senza LB sorgente non li rimuove. Un esito positivo non certifica policy o traffico coerenti. |
+| Lookup di riuso con `ErrorAction=SilentlyContinue`. | Snapshot, dischi, NIC e VM possono non restituire un oggetto anche per problemi di lettura. Il ramo di creazione non distingue esplicitamente risorsa assente da lookup fallito; rischia tentativi impropri, conflitti e diagnosi ambigue. |
+| Stato ricavato dai nomi dei log, indicizzati per solo nome VM. | VM omonime si confondono; vecchie esecuzioni con scritture tardive possono risultare le piu recenti. L'upload log fallito viene trattato come warning: risorse create ed esito mostrato possono divergere. |
+| Nessun preflight completo o rollback. | Righe incomplete vengono scartate, duplicati e risorse fuori ambito non sono respinti preventivamente. Errori possono lasciare risorse parziali; i retry ripetono anche alcuni errori di autorizzazione/configurazione. |
+| Function key condivisa e identita con ambiti subscription. | Il client non ha autorizzazione applicativa per identita/singolo workload; i permessi delle UAMI possono coprire risorse oltre la bolla. Ingresso privato non dimostra isolamento dell'uscita o delle VM DR. |
+| Nessuno smantellamento, retention dei log Blob o test automatici del flusso DR nel repo target. | Pulizia, costi e conservazione dei dati richiedono procedure esterne. Parser/build, smoke check e test Terraform di naming non verificano replica completa o resistenza ai guasti. |
 
-**Oggi l'API sceglie separatamente per ogni VM l'esecuzione con il log modificato piu recentemente. Non implementa un filtro per invocationId o activationId.** Prima di dichiarare successo, confrontare ogni ID con `$Activation.invocationId`: scritture tardive o assenza di nuovi log possono far comparire risultati di prove precedenti. Il reset dei cloni non cancella i log. Controllare in Azure che VM, dischi e NIC esistano e siano operativi; i log non certificano la salute delle applicazioni.
+**Condotta attuale:** usare CSV piccoli, autorizzati e senza VM omonime, chiamate sequenziali e prerequisiti verificati. Dopo un timeout non ripetere la POST prima di verificare l'esecuzione precedente. Confrontare gli ID dei log, controllare direttamente risorse/avvio e provare il servizio applicativo. Sono mitigazioni operative, non una soluzione ai limiti sopra.
 
-## Quali limiti restano importanti
-
-- Snapshot di dischi diversi non coordinano le scritture delle applicazioni. Il codice non fornisce una replica continua o una garanzia di consistenza applicativa.
-- Il riuso degli snapshot non verifica la loro eta; una nuova chiamata puo riusare dati precedenti.
-- Il riuso delle VM confronta alcune proprieta, non tutta la configurazione o la salute. Non avviare esecuzioni concorrenti sugli stessi nomi.
-- La VM DR viene creata senza zona esplicita; i dischi conservano le zone sorgenti quando supportato. Non e garantita la distribuzione zonale delle VM.
-- L'assenza di un ASG DR produce un warning: i prerequisiti devono essere verificati prima della replica.
-- Non esiste un'API di smantellamento. La rimozione dei cloni e una procedura amministrativa separata e autorizzata; conservare i prerequisiti. VM, dischi, snapshot e monitoring generano costi finche restano utilizzati o conservati.
-
-## Come interpretare gli errori
-
-| Quale risposta compare | Che cosa controllare |
+| Quale errore compare | Quale controllo effettuare |
 |---|---|
-| HTTP 400 | Percorso CSV assente, righe non valide oppure parallelismo non ammesso. |
-| HTTP 401 | Function key assente o errata. |
-| HTTP 403 o endpoint irraggiungibile | Autorizzazione o percorso privato/DNS; non aprire il servizio pubblico per aggirarlo. |
-| HTTP 404 | Il blob CSV non esiste nel container configurato. |
-| HTTP 500 | Consultare i log della Function; l'errore pubblico non espone l'eccezione interna. |
-| FAILED con AuthorizationFailed | Identita e ruolo effettivi sull'operazione indicata, compresi i riferimenti al disco sorgente. |
+| 400 | Parametro CSV assente, nessuna riga valida o parallelismo effettivo diverso da 1. Non tutti gli input malformati producono 400. |
+| 401 | Function key mancante o errata. |
+| 403 o endpoint non raggiungibile | Permessi, percorso privato e DNS; non aprire l'accesso pubblico. |
+| 404 | Percorso CSV/blob nel container CSV configurato, mostrato dall'output `csv_container_name`. |
+| 500 | Log della Function e caricamento dei moduli; non cambiare le versioni fissate. |
+| LinkedAuthorizationFailed / beginGetAccess | Disk Backup Reader della **UAMI DR sulla sorgente**, non solo Reader dell'altra identita. |
+| AuthorizationFailed | Identita effettiva, ruolo, scope, deny assignment/policy/lock dell'operazione. |
 
-## Cosa ho dato per scontato
+## Migliorie prioritarie e verifiche
 
-Il gestore dell'ambiente fornisce risorse preesistenti, ruoli sufficienti, cifratura DR e percorso privato funzionante. Sono prerequisiti da verificare, non garantiti dal Terraform o dal README.
+Le seguenti sono proposte, non funzionalita presenti. **Prima dell'uso enterprise** indica correzioni necessarie per il requisito multi-DR e per attivazioni governate; le altre dipendono dagli obiettivi di disponibilita, sicurezza e recupero concordati. Una garanzia richiede test e prove, non la sola presenza di istruzioni nel README.
 
-## Le 3 domande che ti verrebbe da farmi
+| Quando intervenire | Quale modifica proporre | Quale prova ne verifica l'efficacia |
+|---|---|---|
+| Prima dell'uso enterprise. | Risolvere per riga nome primario + `-DR` in un ID DR univoco e autorizzato; poi eliminare la DR globale. | Due primarie raggiungono solo le rispettive DR; mapping assente/ambiguo blocca le scritture. |
+| Prima dell'uso enterprise. | Separare HTTP starter e job con Queue/worker o Durable Functions, workflow persistente; restituire ID/URL di stato e conservare stato, checkpoint e versione CSV. Verificare compatibilita, ruoli e costi. | Job oltre 230 secondi interrogabile per ID, anche dopo timeout/riavvio o scritture tardive. |
+| Prima dell'uso enterprise. | Chiave di idempotenza, lock distribuito per subscription/gruppo/VM e contesti Azure espliciti per tutte le operazioni. | POST sovrapposte non duplicano il workload e non cambiano contesto di operazioni altrui. |
+| Prima dell'uso enterprise. | Validare CSV, dimensione/numero/unicita righe e ambiti autorizzati; preflight di permessi, nomi/IP, prerequisiti, quota e operazioni previste. | Riga vietata, IP occupato o prerequisito mancante: errore esplicito e zero creazioni. |
+| Prima dell'uso enterprise. | Definire separatamente ripresa della stessa attivazione e ripristino con dati nuovi. Per ogni risorsa registrare ID, sorgente e generazione del restore; verificare stato e appartenenza prima del riuso. | La ripresa conserva la generazione prevista; un nuovo ripristino non usa silenziosamente vecchi snapshot. Risorse estranee, occupate o non pronte sono respinte. |
+| Prima dell'uso enterprise. | Verificare tutti i dischi/caching/LUN, NIC e collegamenti della VM riusata; dimensione/tier/collegamento dei dischi, stato snapshot/VM e avvio richiesto. Riparazioni solo esplicite e autorizzate, senza detach o cancellazioni automatiche. | VM spenta/fallita e modello discordante non producono successo; dischi creati e NIC prevista sono realmente associati alla VM corretta. |
+| Prima dell'uso enterprise. | Bloccare ASG obbligatori mancanti/discordanti; selezionare esplicitamente IP configuration e pool, verificando anche collegamenti non previsti. Non rimuoverli senza ownership e approvazione. | ASG errati o pool aggiuntivi inattesi impediscono il successo; nessuna alterazione di traffico o risorse estranee. |
+| Prima dell'uso enterprise. | Distinguere lookup 404, assenza confermata, 403 ed errori transienti. Creare solo dopo assenza verificata e ricontrollare il modello dopo conflitti/concorrenza. | Lettura negata non avvia creazione; due attivazioni concorrenti non adottano risorse discordanti o duplicano le operazioni. |
+| In base a RPO/RTO. | Policy di freschezza e consistenza; quiescing, sospensione controllata delle scritture, o protezione application-aware. Copia cross-region e strategia zonale solo se richieste. | Restore drill con perdita dati, tempi e integrita misurati sulla topologia prevista. |
+| In base alla fedelta richiesta. | Formalizzare proprieta da preservare e differenze intenzionali: controller, security profile, zone, identita, NIC/IP ed estensioni. | Modelli sorgente/DR conformi a ogni proprieta richiesta e alle differenze approvate. |
+| In base alle policy di sicurezza. | Microsoft Entra per caller e autorizzazione per workload; least privilege, endpoint privati, uscita e accesso CSV/log controllati; approvazione delle operazioni distruttive. | Caller/destinazioni vietati respinti; test negativi dei limiti di rete e permessi. |
+| In base a gestione e costi. | Retry solo per errori transienti, checkpoint, cleanup su soli ID del job, retention snapshot/log e alert per attivazione. | Guasti rilevati e residui censiti; cleanup conserva sorgenti, prerequisiti e risorse estranee. |
+| A ogni modifica. | Test automatici con Azure mock e ambiente dedicato per mapping, stati, riuso, errori e concorrenza; pipeline con secret scanning e verifica dipendenze. | Regressioni/segreti bloccati; guasti e ripristino verificati, non solo esiti HTTP. |
 
-1. Devo modificare il codice per un nuovo ambiente? No: configurare tfvars e CSV; leggere i prerequisiti e la convenzione dei nomi.
-2. Posso dichiarare la bolla sana con HTTP 202? No: controllare ID, stati e risorse; per le applicazioni servono test applicativi.
-3. Posso riprovare subito dopo un timeout? No: verificare prima che la precedente esecuzione non sia ancora attiva.
+Punto di partenza piu semplice: correggere routing multi-DR e preflight, rendere univoci job e stato, impedire sovrapposizioni. Una riscrittura o servizi aggiuntivi vanno introdotti solo per coprire requisiti confermati, con costo operativo esplicito. Queste proposte non sono ancora implementate.
 
-## Fonti
+## Riferimenti
 
-- Provider e risorsa Flex: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/function_app_flex_consumption
-- Variabili Terraform: https://developer.hashicorp.com/terraform/language/values/variables
-- Networking privato e subnet: https://learn.microsoft.com/azure/azure-functions/functions-networking-options
-- Packaging e deployment Flex: https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan
-- PowerShell, moduli e contesti: https://learn.microsoft.com/azure/azure-functions/functions-reference-powershell
-- Selezione UAMI: https://learn.microsoft.com/powershell/module/az.accounts/connect-azaccount
-- Permessi di lettura ed export dei dischi: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/compute#disk-backup-reader
-- Ruoli compute e snapshot: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/compute
-- Ruoli dati storage: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/storage
-- Ruoli di gestione e identita: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/identity
-- Invio telemetria autenticata: https://learn.microsoft.com/azure/azure-monitor/app/azure-ad-authentication
-- Cifratura tramite Disk Encryption Set: https://learn.microsoft.com/azure/virtual-machines/disks-enable-customer-managed-keys-portal
-- Ruoli di rete: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/networking
-- Assegnazione dei ruoli e scope: https://learn.microsoft.com/azure/role-based-access-control/role-assignments-portal
-- Timeout: https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration
-- Comportamento della replica e dello stato: codice in `function-app/Invoke-DRReplication`, `Get-DRStatus` e `Modules/DRCore`. Le fonti Microsoft supportano le funzionalita della piattaforma, non certificano automaticamente questa implementazione.
+- Codice che decide creazione/riuso e collegamenti DR: [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1). Le fonti Microsoft spiegano la piattaforma, non certificano automaticamente questa implementazione.
+- Flussi e stati delle API: [Invoke-DRReplication/run.ps1](function-app/Invoke-DRReplication/run.ps1) e [Get-DRStatus/run.ps1](function-app/Get-DRStatus/run.ps1).
+- Hosting, autenticazione, packaging e smoke check: [terraform/main.tf](terraform/main.tf), [function-app/host.json](function-app/host.json), [scripts/build.ps1](scripts/build.ps1) e [scripts/deploy.ps1](scripts/deploy.ps1).
+- [Modello di struttura](https://github.com/stefze/Attivazione-Bolla/blob/main/README.md); le istruzioni sopra riguardano questa versione, non il deployment Bicep/azd del sorgente.
+- [Vincoli di naming Azure per tipo di risorsa](https://learn.microsoft.com/azure/azure-resource-manager/management/resource-name-rules): caratteri, lunghezze e ambito di unicita si verificano dopo aver aggiunto suffissi/prefissi.
+- [Private DNS zone dei servizi Azure](https://learn.microsoft.com/azure/private-link/private-endpoint-dns#commercial): domini tecnici da preservare nella configurazione public cloud.
+- [Scope RBAC](https://learn.microsoft.com/azure/role-based-access-control/scope-overview) e [ruoli dati Storage](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/storage).
+- [Requisiti host e condizioni delle estensioni](https://learn.microsoft.com/azure/azure-functions/manage-connections?pivots=functions-auth-identity&tabs=host#grant-permissions-to-an-identity): Blob Data Owner, diagnostica Table e casi Queue.
+- [Uso dei servizi storage](https://learn.microsoft.com/azure/azure-functions/storage-considerations?pivots=flex-consumption-plan): account compatibile, deployment Blob e differenze tra piani.
+- [Definizione Contributor](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/privileged#contributor): gestione risorse, senza permessi dati Blob o gestione dei role assignment.
+- [Application Insights: telemetria autenticata e Monitoring Metrics Publisher](https://learn.microsoft.com/azure/azure-monitor/app/azure-ad-authentication).
+- [Log Analytics: controllo dell'accesso ai log](https://learn.microsoft.com/azure/azure-monitor/logs/manage-access).
+- [Ruoli compute e Disk Backup Reader](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/compute) e [Managed Identity Operator](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/identity).
+- [Networking Azure Functions](https://learn.microsoft.com/azure/azure-functions/functions-networking-options), [deployment Flex](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan) e [timeout](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
+- [Output binding PowerShell](https://learn.microsoft.com/azure/azure-functions/functions-reference-powershell#bindings) e [pattern HTTP di Durable Functions](https://learn.microsoft.com/azure/durable-task/durable-functions/durable-functions-http-features#expose-http-apis).
+- [Snapshot e consistenza dei dati](https://learn.microsoft.com/azure/virtual-machines/backup-and-disaster-recovery-for-azure-iaas-disks) e [copia snapshot tra regioni](https://learn.microsoft.com/azure/virtual-machines/disks-copy-incremental-snapshot-across-regions).
+- [Sicurezza degli endpoint Functions](https://learn.microsoft.com/azure/azure-functions/security-concepts#secure-operation): function key, autenticazione dei client e least privilege.
