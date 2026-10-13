@@ -9,6 +9,7 @@ function Write-StatusLog {
 }
 
 try {
+    Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'Modules/DRCore/DRCore.psm1') -Force -ErrorAction Stop
     Write-StatusLog "=== DR Status Check Function Started ==="
 
     # Extract CSV blob path from request
@@ -97,17 +98,24 @@ try {
 
     foreach ($vm in $vmList) {
         $vmName = $vm.SourceVmName
+        $sourceSubscriptionId = $null
+        $sourceResourceGroup = [string]$vm.SourceResourceGroup
         Write-StatusLog "Checking status for VM: $vmName"
 
         try {
+            $source = Resolve-Subscription -SubscriptionIdentifier ([string]$vm.SourceSubscription) `
+                -DefaultProfile $storageProfile -TenantId $storageProfile.Tenant.Id
+            $sourceSubscriptionId = [string]$source.Id
             # List all log blobs for this VM
-            $prefix = "$vmName/"
+            $prefix = Get-DRLogPrefix -SourceSubscriptionId $source.Id -SourceResourceGroup $sourceResourceGroup -SourceVmName $vmName
             $blobs = Get-AzStorageBlob -Container $logContainerName -Prefix $prefix -Context $ctx -ErrorAction Stop
 
             if ($blobs.Count -eq 0) {
                 Write-StatusLog "No logs found for VM: $vmName" 'WARN'
                 $results += @{
                     vmName = $vmName
+                    sourceSubscriptionId = $sourceSubscriptionId
+                    sourceResourceGroup = $sourceResourceGroup
                     status = 'UNKNOWN'
                     message = 'No logs found'
                 }
@@ -121,7 +129,7 @@ try {
             foreach ($blob in $blobs) {
                 $blobName = $blob.Name
                 # Extract invocationId from blob name
-                if ($blobName -match "^$vmName/([a-f0-9\-]+)-stage") {
+                if ($blobName -match ("^" + [regex]::Escape($prefix) + "([a-f0-9\-]+)-stage")) {
                     $invocationId = $matches[1]
 
                     if (-not $invocations.ContainsKey($invocationId)) {
@@ -144,6 +152,8 @@ try {
                 Write-StatusLog "Could not parse logs for VM: $vmName" 'WARN'
                 $results += @{
                     vmName = $vmName
+                    sourceSubscriptionId = $sourceSubscriptionId
+                    sourceResourceGroup = $sourceResourceGroup
                     status = 'UNKNOWN'
                     message = 'Invalid log format'
                 }
@@ -169,6 +179,8 @@ try {
                 Write-StatusLog "VM $vmName : SUCCEEDED (Completion marker found)"
                 $results += @{
                     vmName = $vmName
+                    sourceSubscriptionId = $sourceSubscriptionId
+                    sourceResourceGroup = $sourceResourceGroup
                     status = 'SUCCEEDED'
                     invocationId = $invocationId
                     completedStage = 'Completed'
@@ -186,6 +198,8 @@ try {
                         Write-StatusLog "VM $vmName : FAILED at $stageName"
                         $results += @{
                             vmName = $vmName
+                            sourceSubscriptionId = $sourceSubscriptionId
+                            sourceResourceGroup = $sourceResourceGroup
                             status = 'FAILED'
                             invocationId = $invocationId
                             failedStage = $stageName
@@ -194,6 +208,8 @@ try {
                         Write-StatusLog "VM $vmName : FAILED (unknown stage)"
                         $results += @{
                             vmName = $vmName
+                            sourceSubscriptionId = $sourceSubscriptionId
+                            sourceResourceGroup = $sourceResourceGroup
                             status = 'FAILED'
                             invocationId = $invocationId
                             failedStage = 'UNKNOWN'
@@ -214,6 +230,8 @@ try {
 
                     $results += @{
                         vmName = $vmName
+                        sourceSubscriptionId = $sourceSubscriptionId
+                        sourceResourceGroup = $sourceResourceGroup
                         status = 'IN_PROGRESS'
                         invocationId = $invocationId
                         lastCompletedStage = if ($completedStages) { "Stage-$completedStages" } else { 'None' }
@@ -226,6 +244,8 @@ try {
             Write-StatusLog $_.ScriptStackTrace 'ERROR'
             $results += @{
                 vmName = $vmName
+                sourceSubscriptionId = $sourceSubscriptionId
+                sourceResourceGroup = $sourceResourceGroup
                 status = 'ERROR'
                 message = 'Internal error while checking this VM. Consult the function logs.'
             }

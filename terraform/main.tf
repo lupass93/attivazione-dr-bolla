@@ -173,7 +173,6 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     SOURCE_IDENTITY_CLIENT_ID                 = data.azurerm_user_assigned_identity.source.client_id
     TARGET_IDENTITY_CLIENT_ID                 = data.azurerm_user_assigned_identity.target.client_id
     HOSTING_SUBSCRIPTION_ID                   = var.hosting_subscription_id
-    TARGET_SUBSCRIPTION_ID                    = var.dr_subscription_id
     CSV_STORAGE_CONNECTION__blobServiceUri    = data.azurerm_storage_account.hosting.primary_blob_endpoint
     CSV_CONTAINER_NAME                        = azurerm_storage_container.application["dr-configs"].name
     LOG_CONTAINER_NAME                        = azurerm_storage_container.application["dr-logs"].name
@@ -181,7 +180,7 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     PARALLEL_THROTTLE                         = "1"
     PSWorkerInProcConcurrencyUpperBound       = "1"
     SNAPSHOT_NAME_PREFIX                      = "snap-"
-    TARGET_SUBSCRIPTION_SUFFIX                = var.target_name_suffix
+    TARGET_SUBSCRIPTION_SUFFIX                = var.target_subscription_suffix
     TARGET_RESOURCE_GROUP_SUFFIX              = var.target_name_suffix
     TARGET_VNET_NAME_SUFFIX                   = var.target_name_suffix
     TARGET_VNET_RG_SUFFIX                     = var.target_name_suffix

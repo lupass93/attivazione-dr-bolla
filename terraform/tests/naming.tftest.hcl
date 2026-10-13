@@ -62,7 +62,6 @@ mock_provider "azurerm" {
 
 variables {
   hosting_subscription_id = "00000000-0000-0000-0000-000000000000"
-  dr_subscription_id      = "00000000-0000-0000-0000-000000000000"
   resource_group_name     = "existing-hosting-rg"
   storage_account_name    = "existingstorageaccount"
   source_identity_name    = "existing-source-identity"
@@ -229,6 +228,21 @@ run "partial_override_preserves_other_defaults" {
       azurerm_function_app_flex_consumption.hosting.app_settings["CSV_CONTAINER_NAME"] == "client-configs" &&
     azurerm_function_app_flex_consumption.hosting.app_settings["LOG_CONTAINER_NAME"] == "dr-logs")
     error_message = "A partial naming override must leave unrelated defaults unchanged."
+  }
+}
+
+run "subscription_and_resource_suffixes_are_independent" {
+  command = plan
+  variables {
+    target_name_suffix         = "-MS-DR"
+    target_subscription_suffix = "-DR"
+  }
+  assert {
+    condition = (azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_SUBSCRIPTION_SUFFIX"] == "-DR" &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_RESOURCE_GROUP_SUFFIX"] == "-MS-DR" &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_VNET_NAME_SUFFIX"] == "-MS-DR" &&
+    azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_DES_NAME_SUFFIX"] == "-MS-DR")
+    error_message = "An isolated lab resource suffix must not change the source-to-DR subscription mapping."
   }
 }
 

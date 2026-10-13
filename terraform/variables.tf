@@ -50,11 +50,6 @@ variable "target_identity_resource_group_name" {
   nullable    = true
 }
 
-variable "dr_subscription_id" {
-  type        = string
-  description = "Destination subscription ID. Primary subscription IDs or names are supplied in the CSV."
-}
-
 variable "function_app_name" {
   type        = string
   description = "Globally unique Function App name; prefixes default resource names unless overridden in resource_names."
@@ -90,8 +85,24 @@ variable "private_endpoints_subnet_prefix" {
 
 variable "target_name_suffix" {
   type        = string
-  description = "Suffix used to resolve existing DR Resource Groups, VNet, DES, ASGs and Load Balancers."
+  description = "Nonempty suffix used to resolve existing DR Resource Groups, VNet, DES, ASGs and Load Balancers."
   default     = "-DR"
+
+  validation {
+    condition     = length(trimspace(var.target_name_suffix)) > 0 && var.target_name_suffix == trimspace(var.target_name_suffix)
+    error_message = "Provide a nonempty DR naming suffix without leading or trailing whitespace."
+  }
+}
+
+variable "target_subscription_suffix" {
+  type        = string
+  description = "Nonempty suffix used to resolve each source subscription's DR subscription independently of resource naming."
+  default     = "-DR"
+
+  validation {
+    condition     = length(trimspace(var.target_subscription_suffix)) > 0 && var.target_subscription_suffix == trimspace(var.target_subscription_suffix)
+    error_message = "Provide a nonempty DR subscription suffix without leading or trailing whitespace."
+  }
 }
 
 variable "maximum_instance_count" {

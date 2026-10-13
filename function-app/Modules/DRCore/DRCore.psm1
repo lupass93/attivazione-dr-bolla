@@ -71,11 +71,65 @@ function Invoke-WithRetry {
 }
 
 function Resolve-Subscription {
-    param([string]$SubscriptionIdentifier)
-    $subs = Invoke-WithRetry -Operation 'Get-AzSubscription' -ScriptBlock { Get-AzSubscription -ErrorAction Stop }
-    $sub  = $subs | Where-Object { $_.Id -eq $SubscriptionIdentifier -or $_.Name -eq $SubscriptionIdentifier } | Select-Object -First 1
-    if (-not $sub) { throw "Subscription '$SubscriptionIdentifier' not found or not accessible." }
-    return $sub
+    param([string]$SubscriptionIdentifier, [Parameter(Mandatory = $true)] [object]$DefaultProfile, [string]$TenantId)
+    $subs = Invoke-WithRetry -Operation 'Get-AzSubscription' -ScriptBlock {
+        Get-AzSubscription -TenantId $TenantId -DefaultProfile $DefaultProfile -ErrorAction Stop
+    }
+    $matches = @($subs | Where-Object { $_.Id -eq $SubscriptionIdentifier -or $_.Name -eq $SubscriptionIdentifier })
+    if ($matches.Count -ne 1) {
+        throw "Source subscription '$SubscriptionIdentifier' must resolve to exactly one accessible subscription; found $($matches.Count)."
+    }
+    if ($matches[0].State -ne 'Enabled' -or $matches[0].TenantId -ne $TenantId) {
+        throw "Source subscription '$SubscriptionIdentifier' is disabled or belongs to a different tenant."
+    }
+    return $matches[0]
+}
+
+function Resolve-DRSubscription {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [object] $SourceSubscription,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Subscriptions,
+        [string] $Suffix = '-DR'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourceSubscription.Name) -or
+        [string]::IsNullOrWhiteSpace($SourceSubscription.Id) -or
+        [string]::IsNullOrWhiteSpace($SourceSubscription.TenantId) -or
+        [string]::IsNullOrWhiteSpace($Suffix)) {
+        throw 'Source subscription ID, name, tenant and a nonempty DR suffix are required.'
+    }
+    $expectedName = "$($SourceSubscription.Name)$Suffix"
+    $matches = @($Subscriptions | Where-Object { $_.Name -eq $expectedName })
+    if ($matches.Count -ne 1) {
+        throw "DR subscription '$expectedName' must resolve to exactly one accessible subscription; found $($matches.Count)."
+    }
+    $target = $matches[0]
+    if ($target.TenantId -ne $SourceSubscription.TenantId) {
+        throw "DR subscription '$expectedName' belongs to a different tenant."
+    }
+    if ($target.State -ne 'Enabled') {
+        throw "DR subscription '$expectedName' is not enabled."
+    }
+    if ([string]::IsNullOrWhiteSpace($target.Id) -or $target.Id -eq $SourceSubscription.Id) {
+        throw "DR subscription '$expectedName' must have a valid ID distinct from the source."
+    }
+    return $target
+}
+
+function Get-DRLogPrefix {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [guid] $SourceSubscriptionId,
+        [Parameter(Mandatory = $true)] [string] $SourceResourceGroup,
+        [Parameter(Mandatory = $true)] [string] $SourceVmName
+    )
+    foreach ($value in @($SourceResourceGroup, $SourceVmName)) {
+        if ([string]::IsNullOrWhiteSpace($value) -or $value.Contains('/') -or $value.Contains([string][char]92)) {
+            throw 'Source Resource Group and VM names must be nonempty and contain no path separators.'
+        }
+    }
+    return "$($SourceSubscriptionId.ToString().ToLowerInvariant())/$($SourceResourceGroup.ToLowerInvariant())/$($SourceVmName.ToLowerInvariant())/"
 }
 
 function Set-SubscriptionContext {
@@ -162,7 +216,8 @@ function Upload-StageLog {
         [string]$LogContainerName,
         [string]$InvocationId
     )
-    if ([string]::IsNullOrWhiteSpace($LogStorageAccountName) -or [string]::IsNullOrWhiteSpace($LogContainerName)) {
+    if ([string]::IsNullOrWhiteSpace($LogStorageAccountName) -or [string]::IsNullOrWhiteSpace($LogContainerName) -or
+        [string]::IsNullOrWhiteSpace($script:LogPrefix)) {
         Write-Log "Skipping stage log upload (storage not configured)." 'WARN' -VmName $VmName
         return
     }
@@ -175,7 +230,7 @@ function Upload-StageLog {
         $logContent = $logEntries -join "`n"
         $timestamp  = Get-Date -Format 'yyyyMMdd-HHmm'
         $failSuffix = if ($Failed) { '-failed' } else { '' }
-        $logBlobName = "$VmName/$InvocationId-stage$StageId-$StageDescription-$timestamp$failSuffix.log"
+        $logBlobName = "$($script:LogPrefix)$InvocationId-stage$StageId-$StageDescription-$timestamp$failSuffix.log"
         $tmpLog = [System.IO.Path]::GetTempFileName()
         try {
             [System.IO.File]::WriteAllText($tmpLog, $logContent, [System.Text.Encoding]::UTF8)
@@ -324,6 +379,9 @@ function Invoke-VMReplication {
 
     $result = [ordered]@{
         SourceVmName = $SourceVmName
+        SourceSubscriptionId = $null
+        SourceResourceGroup = $SourceResourceGroup
+        TargetSubscriptionId = $null
         TargetVmName = $null
         Status       = 'Running'
         Error        = $null
@@ -338,22 +396,33 @@ function Invoke-VMReplication {
         # ── Resolve subscriptions ───────────────────────────────────────────────
         Write-Log "Resolving subscriptions." -VmName $SourceVmName
 
+        $script:LogPrefix = $null
         if ([string]::IsNullOrWhiteSpace($env:SOURCE_IDENTITY_CLIENT_ID) -or
             [string]::IsNullOrWhiteSpace($env:TARGET_IDENTITY_CLIENT_ID) -or
-            [string]::IsNullOrWhiteSpace($env:TARGET_SUBSCRIPTION_ID)) {
-            throw 'SOURCE_IDENTITY_CLIENT_ID, TARGET_IDENTITY_CLIENT_ID and TARGET_SUBSCRIPTION_ID must be configured.'
+            [string]::IsNullOrWhiteSpace($env:HOSTING_SUBSCRIPTION_ID)) {
+            throw 'SOURCE_IDENTITY_CLIENT_ID, TARGET_IDENTITY_CLIENT_ID and HOSTING_SUBSCRIPTION_ID must be configured.'
         }
         Disable-AzContextAutosave -Scope Process | Out-Null
+        $sourceLogin = (Connect-AzAccount -Identity -AccountId $env:SOURCE_IDENTITY_CLIENT_ID `
+            -Subscription $env:HOSTING_SUBSCRIPTION_ID -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
+        $sourceSub = Resolve-Subscription -SubscriptionIdentifier $SourceSubscription `
+            -DefaultProfile $sourceLogin -TenantId $sourceLogin.Tenant.Id
         $script:SourceContext = (Connect-AzAccount -Identity -AccountId $env:SOURCE_IDENTITY_CLIENT_ID `
-            -Subscription $SourceSubscription -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
-        $sourceSub = $script:SourceContext.Subscription
+            -Tenant $sourceSub.TenantId -Subscription $sourceSub.Id -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
+        $result.SourceSubscriptionId = [string]$sourceSub.Id
+        $script:LogPrefix = Get-DRLogPrefix -SourceSubscriptionId $sourceSub.Id `
+            -SourceResourceGroup $SourceResourceGroup -SourceVmName $SourceVmName
         if (-not [string]::IsNullOrWhiteSpace($LogStorageAccountName)) {
             $script:LogStorageContext = New-AzStorageContext -StorageAccountName $LogStorageAccountName `
                 -UseConnectedAccount -ErrorAction Stop
         }
+        $targetLogin = (Connect-AzAccount -Identity -AccountId $env:TARGET_IDENTITY_CLIENT_ID `
+            -Tenant $sourceSub.TenantId -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
+        $targetSubscriptions = @(Get-AzSubscription -TenantId $sourceSub.TenantId -DefaultProfile $targetLogin -ErrorAction Stop)
+        $targetSub = Resolve-DRSubscription -SourceSubscription $sourceSub -Subscriptions $targetSubscriptions -Suffix $effSubSuffix
         $script:TargetContext = (Connect-AzAccount -Identity -AccountId $env:TARGET_IDENTITY_CLIENT_ID `
-            -Subscription $env:TARGET_SUBSCRIPTION_ID -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
-        $targetSub = $script:TargetContext.Subscription
+            -Tenant $targetSub.TenantId -Subscription $targetSub.Id -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
+        $result.TargetSubscriptionId = [string]$targetSub.Id
 
         Write-Log "Source sub: '$($sourceSub.Name)' | Target sub: '$($targetSub.Name)'" -VmName $SourceVmName
 
@@ -563,7 +632,7 @@ function Invoke-VMReplication {
 
         # Get DES first (must exist) to determine target location
         $des = Invoke-WithRetry -Operation "Get-AzDiskEncryptionSet $targetDesName" -ScriptBlock {
-            Get-AzDiskEncryptionSet -ResourceGroupName $targetDesRg -Name $targetDesName -ErrorAction Stop
+            Get-AzDiskEncryptionSet -ResourceGroupName $targetDesRg -Name $targetDesName -DefaultProfile $script:TargetContext -ErrorAction Stop
         }
         if ($null -eq $des) { throw "Target DES '$targetDesName' not found in RG '$targetDesRg'." }
 
@@ -663,7 +732,7 @@ function Invoke-VMReplication {
                 Write-Log "  Snapshot reused:  '$($r.SnapshotName)'" -VmName $SourceVmName
             }
             $snapshotByDiskName[$r.DiskName] = Invoke-WithRetry -Operation "Get-AzSnapshot $($r.SnapshotName)" -ScriptBlock {
-                Get-AzSnapshot -ResourceGroupName $targetSnapDiskRg -SnapshotName $r.SnapshotName -ErrorAction Stop
+                Get-AzSnapshot -ResourceGroupName $targetSnapDiskRg -SnapshotName $r.SnapshotName -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
         }
         Write-Log "Stage B complete. Snapshots=$($snapshotResults.Count)" -VmName $SourceVmName
@@ -695,7 +764,7 @@ function Invoke-VMReplication {
             $snapshot = $snapshotByDiskName[$disk.Name]
             if ($null -eq $snapshot) { throw "Snapshot object not found for disk '$($disk.Name)'." }
 
-            $existingDisk = Get-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -ErrorAction SilentlyContinue
+            $existingDisk = Get-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
             if ($existingDisk) {
                 $ok = (Normalize $existingDisk.CreationData.SourceResourceId) -eq (Normalize $snapshot.Id) -and
                       (Normalize $existingDisk.Sku.Name)  -eq (Normalize $disk.SkuName) -and
@@ -726,7 +795,7 @@ function Invoke-VMReplication {
 
             $diskConfig = Invoke-WithRetry -Operation "New-AzDiskConfig $($disk.Name)" -ScriptBlock { New-AzDiskConfig @cfgArgs -ErrorAction Stop }
             $newDisk    = Invoke-WithRetry -Operation "New-AzDisk $($disk.Name)" -ScriptBlock {
-                New-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -Disk $diskConfig -ErrorAction Stop
+                New-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -Disk $diskConfig -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
             $targetDisksByName[$disk.Name] = $newDisk
             [void]$summary.DisksCreated.Add($disk.Name)
@@ -763,7 +832,7 @@ function Invoke-VMReplication {
         }
 
         $targetVnet = Invoke-WithRetry -Operation "Get-AzVirtualNetwork $targetVnetName" -ScriptBlock {
-            Get-AzVirtualNetwork -ResourceGroupName $targetVnetRg -Name $targetVnetName -ErrorAction Stop
+            Get-AzVirtualNetwork -ResourceGroupName $targetVnetRg -Name $targetVnetName -DefaultProfile $script:TargetContext -ErrorAction Stop
         }
         $targetSubnet = $targetVnet.Subnets | Where-Object { $_.Name -eq $targetSubnetName } | Select-Object -First 1
         if ($null -eq $targetSubnet) {
@@ -798,7 +867,7 @@ function Invoke-VMReplication {
                 $tAsgRg     = $targetVnetRg
                 # Re-verify context before Get-AzApplicationSecurityGroup to prevent context drift
                 Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
-                $tAsg = Get-AzApplicationSecurityGroup -ResourceGroupName $tAsgRg -Name $tAsgName -ErrorAction SilentlyContinue
+                $tAsg = Get-AzApplicationSecurityGroup -ResourceGroupName $tAsgRg -Name $tAsgName -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
                 if ($null -eq $tAsg) {
                     Write-Log "  WARNING: Target ASG '$tAsgName' not found in RG '$tAsgRg'. ASG must be pre-created. NIC will be created without this ASG binding." 'WARN' -VmName $SourceVmName
                 } else {
@@ -810,7 +879,7 @@ function Invoke-VMReplication {
 
         # NIC - re-verify context before Get to prevent context drift
         Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
-        $targetNic = Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -ErrorAction SilentlyContinue
+        $targetNic = Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
         if ($null -eq $targetNic) {
             $ipCfgArgs = @{
                 Name     = $srcIpCfgName
@@ -829,7 +898,7 @@ function Invoke-VMReplication {
             Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
             $targetNic = Invoke-WithRetry -Operation "New-AzNetworkInterface $targetNicName" -ScriptBlock {
                 New-AzNetworkInterface -ResourceGroupName $targetVmRg -Location $targetLocation `
-                    -Name $targetNicName -IpConfiguration $ipCfg -Tag $targetVmTags -ErrorAction Stop
+                    -Name $targetNicName -IpConfiguration $ipCfg -Tag $targetVmTags -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
             [void]$summary.NicsCreated.Add($targetNicName)
             $asgNote = if ($targetAsgIds.Count -gt 0) { " with $($targetAsgIds.Count) ASG(s)" } else { '' }
@@ -866,7 +935,7 @@ function Invoke-VMReplication {
 
         # Re-verify context before Get-AzVM to prevent context drift
         Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
-        $existingVm = Get-AzVM -ResourceGroupName $targetVmRg -Name $targetVmName -ErrorAction SilentlyContinue
+        $existingVm = Get-AzVM -ResourceGroupName $targetVmRg -Name $targetVmName -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
         if ($existingVm) {
             if ((Normalize $existingVm.HardwareProfile.VmSize) -ne (Normalize $sourceVm.HardwareProfile.VmSize)) {
                 throw "Existing VM '$targetVmName' size mismatch (existing='$($existingVm.HardwareProfile.VmSize)' expected='$($sourceVm.HardwareProfile.VmSize)')."
@@ -909,7 +978,7 @@ function Invoke-VMReplication {
             Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
             Invoke-WithRetry -Operation "New-AzVM $targetVmName" -ScriptBlock {
                 New-AzVM -ResourceGroupName $targetVmRg -Location $targetLocation `
-                    -VM $vmConfig -Tag $targetVmTags -ErrorAction Stop | Out-Null
+                    -VM $vmConfig -Tag $targetVmTags -DefaultProfile $script:TargetContext -ErrorAction Stop | Out-Null
             } | Out-Null
 
             [void]$summary.VmsCreated.Add($targetVmName)
@@ -935,14 +1004,14 @@ function Invoke-VMReplication {
             }
 
             $lb = Invoke-WithRetry -Operation "Get-AzLoadBalancer $targetLbName" -ScriptBlock {
-                Get-AzLoadBalancer -ResourceGroupName $targetLbRg -Name $targetLbName -ErrorAction Stop
+                Get-AzLoadBalancer -ResourceGroupName $targetLbRg -Name $targetLbName -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
             $pool = Select-BackendPool -LoadBalancer $lb -SourcePoolNames $srcBackendPoolNames -PoolNameOverride $BackendPoolNameOverride
             Write-Log "Selected backend pool '$($pool.Name)'." -VmName $SourceVmName
 
             # Refresh NIC after VM creation
             $targetNic = Invoke-WithRetry -Operation "Refresh NIC $targetNicName" -ScriptBlock {
-                Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -ErrorAction Stop
+                Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
             $nicIpCfgForLb = $targetNic.IpConfigurations | Where-Object { $_.Name -eq $srcIpCfgName } | Select-Object -First 1
             if ($null -eq $nicIpCfgForLb) { $nicIpCfgForLb = $targetNic.IpConfigurations | Select-Object -First 1 }
@@ -962,11 +1031,11 @@ function Invoke-VMReplication {
                 # Re-verify context immediately before Set-AzNetworkInterface
                 Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
                 Invoke-WithRetry -Operation 'Set-AzNetworkInterface (LB pool attach)' -ScriptBlock {
-                    Set-AzNetworkInterface -NetworkInterface $targetNic -ErrorAction Stop | Out-Null
+                    Set-AzNetworkInterface -NetworkInterface $targetNic -DefaultProfile $script:TargetContext -ErrorAction Stop | Out-Null
                 } | Out-Null
 
                 # Verify
-                $verifyNic    = Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -ErrorAction Stop
+                $verifyNic    = Get-AzNetworkInterface -ResourceGroupName $targetVmRg -Name $targetNicName -DefaultProfile $script:TargetContext -ErrorAction Stop
                 $verifyIpCfg  = $verifyNic.IpConfigurations | Where-Object { $_.Name -eq $nicIpCfgForLb.Name } | Select-Object -First 1
                 $verifyPoolIds = @($verifyIpCfg.LoadBalancerBackendAddressPools | ForEach-Object { Normalize $_.Id })
                 if (-not ($verifyPoolIds -contains (Normalize $pool.Id))) {
@@ -1022,4 +1091,4 @@ function Invoke-VMReplication {
     return [pscustomobject]$result
 }
 
-Export-ModuleMember -Function Invoke-VMReplication
+Export-ModuleMember -Function Invoke-VMReplication, Resolve-DRSubscription, Resolve-Subscription, Get-DRLogPrefix

@@ -4,6 +4,8 @@ Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure
 
 > Questa soluzione deriva dalla copia corretta di [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla). Il README descrive il codice attuale; le migliorie indicate come proposte non sono implementate.
 
+**Branch della feature:** questo README riguarda `feature/multisubscription-dr`, pubblicata sul ramo remoto omonimo e separata da `delivery`. Clonare il repository sul branch predefinito non recupera queste modifiche: selezionare esplicitamente il ramo feature. Non e stato eseguito alcun merge in delivery e il suo hosting e rimasto invariato.
+
 ## Indice
 
 - [Architettura e risorse](#architettura-e-risorse)
@@ -20,6 +22,7 @@ Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure
 - [Deployment della soluzione](#deployment-della-soluzione)
 - [Configurazione del CSV](#configurazione-del-csv)
 - [Attivazione e verifica](#attivazione-e-verifica)
+- [Collaudo della feature](#collaudo-della-feature)
 - [Limiti e troubleshooting](#limiti-e-troubleshooting)
 - [Migliorie prioritarie e verifiche](#migliorie-prioritarie-e-verifiche)
 - [Riferimenti](#riferimenti)
@@ -42,7 +45,7 @@ Terraform non crea o assegna i ruoli delle identita e non gestisce Resource Grou
 
 **Tre percorsi di osservabilita distinti:** i log di avanzamento vengono scritti da UAMI1 nel container log configurato, default `dr-logs`, e letti dall'API di stato; log/telemetria dell'host vengono inviati ad Application Insights con la stessa UAMI1 e autenticazione Microsoft Entra; le diagnostic settings inoltrano log/metriche dei servizi al workspace. Configurare questi percorsi non equivale a verificare salute o esito delle VM.
 
-**Destinazione attuale:** il CSV puo contenere piu subscription primarie, ma tutte le righe usano la stessa DR, impostata con `dr_subscription_id` / `TARGET_SUBSCRIPTION_ID`. Il suffisso `TARGET_SUBSCRIPTION_SUFFIX` non viene usato per risolvere una DR diversa per ciascuna primaria. Il requisito primaria A -> A-DR, primaria B -> B-DR richiede una correzione del codice, non la sola rimozione dell'app setting.
+**Destinazione multisubscription:** per ogni riga CSV, UAMI1 risolve nome/ID della primaria; UAMI2 risolve esattamente il nome primario + `TARGET_SUBSCRIPTION_SUFFIX`, default `-DR`, nello stesso tenant. La DR deve essere unica, abilitata e distinta dalla sorgente. Non esiste una DR globale o un fallback: mapping mancante/ambiguo viene rifiutato prima delle scritture workload. I permessi delle due UAMI devono coprire tutte le rispettive subscription; il collaudo live su due coppie e separato dai test locali.
 
 ## Assunzioni e prerequisiti nel DR
 
@@ -66,12 +69,12 @@ Coerenza non significa copia integrale: il codice preserva solo le proprieta esp
 
 ### Esempi delle subscription sorgenti e DR
 
-Tutti i nomi seguenti sono fittizi. Il requisito e un abbinamento per primaria; **il codice attuale usa invece una sola DR globale**. Nell'esempio, `dr_subscription_id` identifica `sub-site-a-DR` e non viene calcolato dal CSV.
+Tutti i nomi seguenti sono fittizi. Il nome DR viene risolto per ogni primaria usando il suffisso; gli ID sono ricavati dal catalogo accessibile a UAMI2, non da un parametro globale.
 
 | Nome della subscription primaria | Nome della DR richiesta | Destinazione usata oggi con questa configurazione |
 |---|---|---|
-| `sub-site-a` | `sub-site-a-DR` | `sub-site-a-DR`, selezionata con `TARGET_SUBSCRIPTION_ID`. |
-| `sub-site-b` | `sub-site-b-DR` | Ancora `sub-site-a-DR`: il mapping per primaria non e implementato. |
+| `sub-site-a` | `sub-site-a-DR` | ID della sola subscription abilitata `sub-site-a-DR` nello stesso tenant. |
+| `sub-site-b` | `sub-site-b-DR` | ID della sola subscription abilitata `sub-site-b-DR` nello stesso tenant. |
 
 ### Esempi dei nomi delle risorse DR
 
@@ -107,7 +110,7 @@ Esempio di una VM di `sub-site-a` ripristinata in `sub-site-a-DR`, con `target_n
 
 Gli esempi organizzativi non introducono requisiti di nome nel codice: frontend, probe, regole, NSG, route table, Key Vault e chiave possono avere altri nomi se la configurazione DR e coerente. Public IP, altre NIC/IP, identita VM ed estensioni non hanno un naming DR derivato dalla Function: non vengono ricopiati esplicitamente.
 
-**Attenzione alle collisioni:** gruppi distinti ma nomi VM uguali restano indistinguibili per l'API di stato, che usa il solo nome VM nel percorso dei log. I nomi degli snapshot sono stabili tra attivazioni: `snap-vm-web-01-os` gia esistente puo essere riusato, non rappresenta automaticamente una nuova copia dei dati.
+**Identita del workload:** i log usano `<ID-primaria>/<Resource-Group>/<nome-VM>/`, con nomi normalizzati. VM omonime in subscription/gruppi diversi sono distinte; nella stessa destinazione restano necessari nomi risorsa non collidenti. Gli snapshot hanno nomi stabili tra attivazioni e possono essere riusati senza rinnovare i dati.
 
 ### Esempi dei nomi dell'hosting Terraform
 
@@ -176,7 +179,7 @@ I controlli sono in [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1#L621),
 |---|---|
 | 1. Legge richiesta e configurazione. | Richiede `csvBlobPath`, parallelismo VM effettivo 1 e suffissi dalle app settings. Parametro mancante/nessuna riga valida: 400; CSV non trovato: 404. |
 | 2. Scarica e valida il CSV con UAMI1. | Legge il container CSV configurato, default `dr-configs`, verifica le tre colonne e scarta righe incomplete con warning. Nessun preflight completo o controllo duplicati. |
-| 3. Avvia il lavoro per riga. | Usa un `invocationId` comune, VM sequenziali, UAMI1 nella subscription sorgente della riga e UAMI2 nella DR globale. |
+| 3. Avvia il lavoro per riga. | Usa un `invocationId` comune e VM sequenziali; UAMI1 seleziona la primaria della riga e UAMI2 la DR risolta per quella primaria. Nessuna operazione workload avviene se la risoluzione DR fallisce. |
 | 4. Stage A: scopre la sorgente. | Legge VM, NIC/IP primari, ASG, pool, dischi OS/dati e DES OS; deriva nomi/gruppi DR. Non congela le scritture applicative. |
 | 5. Stage B: snapshot. | UAMI2 copia ogni disco primario in uno snapshot con DES DR, o riusa quello con sorgente/DES corrispondenti. Serve autorizzazione sulla sorgente alla stessa UAMI2. |
 | 6. Stage C: dischi. | Crea managed disk dagli snapshot. Per il riuso confronta snapshot, SKU, DES, zone e condivisione, non tutte le proprieta. |
@@ -193,7 +196,7 @@ Fonti del comportamento: [handler HTTP](function-app/Invoke-DRReplication/run.ps
 `GET /api/Get-DRStatus?csvBlobPath=...` oppure POST con lo stesso parametro nel body JSON, autorizzate da function key. Usa solo UAMI1 per leggere storage; non chiama UAMI2 per controllare o modificare il DR.
 
 1. Verifica il percorso e scarica il CSV dal container configurato, default `dr-configs`; parametro assente produce 400, CSV non trovato produce 404.
-2. Per ogni `SourceVmName` elenca i blob sotto `<container-log>/<nome-VM>/`, default `dr-logs/<nome-VM>/`. Non usa subscription e Resource Group per distinguere VM omonime.
+2. Risolve ogni subscription primaria con UAMI1 e legge `<container-log>/<ID-primaria>/<Resource-Group>/<nome-VM>/`. Restituisce `sourceSubscriptionId` e `sourceResourceGroup` insieme al nome VM, distinguendo gli omonimi.
 3. Estrae gli `invocationId` dai nomi dei log e sceglie, separatamente per VM, quello con il blob modificato piu recentemente. Non filtra per l'ID della POST richiesta dall'operatore.
 4. Interpreta i marker del gruppo selezionato secondo la tabella sotto; un errore di lettura di una VM diventa `ERROR` e le altre possono essere controllate.
 5. Restituisce `checkedAt`, `vmCount`, `results` e conteggi in `summary`. Un HTTP 200 significa che la richiesta di stato e stata elaborata, non che tutte le VM siano riuscite.
@@ -206,7 +209,7 @@ Fonti del comportamento: [handler HTTP](function-app/Invoke-DRReplication/run.ps
 | `UNKNOWN` | Non esistono log o il loro formato non e riconosciuto. |
 | `ERROR` | La lettura/interpretazione dei log di quella VM genera un errore. |
 
-La risposta e una vista dei log, non un inventario Azure o uno stato autorevole di un job. Un CSV modificato, VM omonime o scritture tardive possono alterare il risultato mostrato. Non certifica Recovery Point Objective (RPO), perdita dati massima ammessa, o Recovery Time Objective (RTO), tempo massimo di ripristino.
+La risposta e una vista dei log, non un inventario Azure o uno stato autorevole di un job. CSV modificato o scritture tardive possono alterare l'esecuzione selezionata. I vecchi log indicizzati solo per nome VM non sono letti come fallback: una nuova attivazione genera il nuovo percorso. Non certifica Recovery Point Objective (RPO), perdita dati massima ammessa, o Recovery Time Objective (RTO), tempo massimo di ripristino.
 
 Fonti del comportamento: [binding GET/POST](function-app/Get-DRStatus/function.json) e [handler di lettura dello stato](function-app/Get-DRStatus/run.ps1).
 
@@ -283,7 +286,9 @@ terraform/        Configurazione AzureRM, variabili, output e file di lock.
 terraform/tests/  Test di naming con provider simulato, senza operazioni Azure.
 function-app/     Host, due funzioni HTTP, DRCore e dipendenze fissate.
 scripts/          build.ps1 e deploy.ps1.
+tests/            Test PowerShell di routing, contesti e stato con Azure simulato.
 examples/vms.csv  Esempio fittizio della configurazione VM.
+examples/vms-multisubscription.csv  Esempio fittizio con VM omonime in due primarie.
 out/             Pacchetto generato localmente, escluso da Git.
 ```
 
@@ -291,11 +296,14 @@ out/             Pacchetto generato localmente, escluso da Git.
 
 Eseguire i comandi in **PowerShell 7.6**, dalla postazione autorizzata con percorso privato. Non cambiare le versioni del provider o dei moduli durante il deployment.
 
-### 1. Scaricare e configurare
+### 1. Selezionare e configurare
+
+Clonare il ramo feature in una directory separata oppure usare il worktree dedicato gia presente. Verificarne il branch prima del deployment; non sostituire il codice del branch delivery per eseguire questa procedura.
 
 ```powershell
-git clone https://github.com/lupass93/attivazione-dr-bolla.git
-Set-Location attivazione-dr-bolla
+git clone --branch feature/multisubscription-dr --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-multisubscription
+Set-Location attivazione-dr-bolla-multisubscription
+git branch --show-current
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
 ```
@@ -304,14 +312,16 @@ az login
 
 | Quali input preparare | Quali valori inserire nel file tfvars |
 |---|---|
-| `hosting_subscription_id`, `dr_subscription_id` | ID delle subscription hosting e dell'unica DR attualmente configurabile; le subscription primarie sono indicate nel CSV. |
+| `hosting_subscription_id` | ID della subscription hosting; le primarie vengono dal CSV e le relative DR dal naming con suffisso. |
 | `resource_group_name`, `storage_account_name` | Nomi del Resource Group e dello Storage Account esistenti. |
 | `source_identity_name`, `target_identity_name` | Nomi delle due UAMI esistenti; Terraform ricava client ID e principal ID. |
 | `function_app_name` | Nome globale univoco della nuova Function. |
 | `resource_names` | Mappa degli override dei nomi risorsa/sotto-risorsa; copiare dall'esempio le sole chiavi richieste dalla naming convention cliente. Ometterla per mantenere tutti i default. |
 | `location`, `vnet_address_space`, `integration_subnet_prefix`, `private_endpoints_subnet_prefix` | Regione concordata e rete/subnet non sovrapposte. Non riutilizzare i prefissi di esempio senza verifica. |
 | `storage_resource_group_name`, `source_identity_resource_group_name`, `target_identity_resource_group_name` | Solo quando le rispettive risorse non sono nel RG di hosting; altrimenti omettere. |
-| `target_name_suffix`, `maximum_instance_count`, `instance_memory_in_mb`, `log_retention_days` | Confermare i default: `-DR`, 10 istanze, 2048 MB e 30 giorni; cambiare solo se necessario e concordato. |
+| `target_subscription_suffix` | Suffisso del nome della subscription primaria per individuare la DR, default `-DR`. Non modifica i nomi delle risorse. |
+| `target_name_suffix` | Suffisso dei Resource Group, VNet, DES, ASG e Load Balancer DR, default `-DR`. Puo essere diverso dal suffisso subscription per isolare un lab senza cambiare il routing. |
+| `maximum_instance_count`, `instance_memory_in_mb`, `log_retention_days` | Confermare i default: 10 istanze, 2048 MB e 30 giorni; cambiare solo se necessario e concordato. |
 
 Non esistono altri file di variabili da compilare. Non pubblicare tfvars, stato, piani o CSV reali. Regione/rete/nomi e prerequisiti devono essere disponibili prima dell'attivita.
 
@@ -346,7 +356,7 @@ Comma-Separated Values (CSV) e un file di colonne separate da virgole. Usare `ex
 | SourceResourceGroup | Resource Group della VM sorgente. |
 | SourceVmName | Nome esatto della VM sorgente. |
 
-La subscription DR viene da `dr_subscription_id`; `target_name_suffix`, default `-DR`, determina i nomi dei prerequisiti DR, non una destinazione subscription per riga. La regione della replica e quella del DES DR. VM e dischi mantengono i nomi sorgenti; gli IP privati vengono riutilizzati. Confermare nomi e IP prima dell'attivazione.
+`target_name_suffix`, default `-DR`, determina per ogni riga il nome della subscription DR e dei suoi prerequisiti. La regione della replica e quella del DES della rispettiva DR. VM e dischi mantengono i nomi sorgenti; gli IP privati vengono riutilizzati. Confermare naming, unicita e IP in entrambe le coppie prima dell'attivazione.
 
 Nella cartella del repository, leggere gli output e caricare il CSV reale preparato localmente:
 
@@ -386,16 +396,32 @@ La POST crea o riusa risorse DR. La risposta **202 arriva dopo l'elaborazione** 
 ```powershell
 $Status = Invoke-RestMethod -Method Get -Uri "$ApiUrl/Get-DRStatus?csvBlobPath=$CsvBlobPath" -Headers $Headers
 $Status.summary | Format-List
-$Status.results | Format-Table vmName, status, invocationId, completedStage, lastCompletedStage, failedStage
+$Status.results | Format-Table sourceSubscriptionId, sourceResourceGroup, vmName, status, invocationId, completedStage, lastCompletedStage, failedStage
 ```
 
 La GET legge i log, non avvia la bolla. Per ogni VM seleziona l'esecuzione con il log modificato piu recentemente: **confrontare l'ID con `$Activation.invocationId`**; non esiste un filtro per ID. `SUCCEEDED` richiede il marker finale; `FAILED` indica uno stage fallito; `IN_PROGRESS` non prova che un processo interrotto sia ancora attivo; `UNKNOWN` significa log assenti/non riconoscibili; `ERROR` indica errore di lettura. Controllare anche VM, dischi, NIC e servizio applicativo.
+
+## Collaudo della feature
+
+Collaudo completato il 12 ottobre 2026 nell'ambito approvato: tre subscription accessibili, una sola coppia primaria/DR reale. Non e stata simulata una seconda coppia facendo convergere primarie diverse nella stessa DR. Hosting, identita, operator, namespace delle risorse target e stato Terraform del test sono separati da delivery e dall'ambiente originale.
+
+| Quale comportamento e stato verificato | Quale prova e disponibile |
+|---|---|
+| Due primarie instradate alle rispettive DR, identita distinte e VM omonime. | Test locali con Azure simulato: 11 controlli del resolver/log, inizializzazione reale di DRCore per due coppie, handler Get-DRStatus e preflight TwoPairs/SinglePair. Non costituiscono un test Azure su due coppie. |
+| Naming Terraform e indipendenza dei due suffissi. | 11 test con provider simulato, formato e validazione Terraform superati. |
+| Hosting e codice correnti separati. | Apply reale: 26 nuove risorse, zero modifiche/distruzioni. Hash dei sorgenti remoti uguali ai locali; entrambi gli endpoint privati verificati senza avviare replica. |
+| Ricostruzione nuova nella coppia reale. | Target inizialmente privo di VM/NIC/dischi/snapshot; due VM, quattro dischi, quattro snapshot e due NIC creati. Due esiti SUCCEEDED correlati; 37 verifiche dirette su provisioning, guest agent, cifratura, origine dei dischi, IP, ASG e backend pool. |
+| Riuso nella stessa coppia. | Seconda invocazione con due esiti SUCCEEDED; 50 verifiche dirette, inclusi tutti gli ID, creation time e GUID delle NIC invariati. |
+| Primary reale senza DR corrispondente. | Resolver produttivo eseguito sull'inventario Azure reale: mapping assente rifiutato prima di qualunque scrittura. Non e una replica Function di un workload della terza primary. |
+| Preservazione di delivery e sorgenti. | 11 controlli: commit/hash/worktree delivery invariati; modelli delle due VM, quattro dischi sorgenti e delle Function originale/delivery uguali alla baseline. |
+
+Restano da verificare in Azure **due coppie distinte nello stesso CSV** quando saranno disponibili quattro subscription. Il collaudo non certifica salute applicativa, consistenza multi-disco, replica geografica o recupero dopo guasti. Il lab mantiene risorse a pagamento finche non viene autorizzato lo smantellamento; stato, valori reali, log, CSV e package restano locali e ignorati da Git.
 
 ## Limiti e troubleshooting
 
 | Quale limite esiste oggi | Quale rischio comporta |
 |---|---|
-| Una sola subscription DR globale. | Non soddisfa primaria A -> A-DR e primaria B -> B-DR. Non usare il suffisso come se quel mapping fosse gia implementato. |
+| Mapping per nome della subscription e suffisso. | Le due identita devono poter enumerare le subscription necessarie; nomi DR duplicati, disabled o cross-tenant sono rifiutati. Una rinomina modifica il mapping e richiede verifica preventiva. |
 | Elaborazione dentro la richiesta HTTP, senza job persistente. | Il frontend puo perdere la risposta oltre circa 230 secondi. `functionTimeout=-1` non elimina riavvii, scale-in o aggiornamenti della piattaforma; non garantisce un'esecuzione infinita. |
 | Nessun lock tra richieste o istanze. | `vmParallelThrottle=1` e `http_concurrency=1` limitano il lavoro locale, non escludono attivazioni sovrapposte sullo stesso workload. |
 | Snapshot e dischi riusati non sono aggiornati dal primario. | Sorgente/DES uguali non provano freschezza o integrita dei dati; nessun controllo di eta, provisioning o readiness dello snapshot. Per il disco non vengono confrontati dimensione, tier o attuale utilizzo/collegamento. Una nuova POST puo continuare con dati precedenti. |
@@ -405,12 +431,12 @@ La GET legge i log, non avvia la bolla. Per ogni VM seleziona l'esecuzione con i
 | Topologia e proprieta VM solo parzialmente ricostruite. | Una NIC e una IP configuration vengono ricreate; gli ASG trovati sulle configurazioni della NIC sorgente vengono raccolti sulla configurazione DR. NSG della NIC, altre NIC/IP, security profile, identita VM ed estensioni non sono ricopiati esplicitamente; zona VM e disk controller non sono impostati esplicitamente. |
 | NIC/pool non vengono riconciliati completamente. | Configurazione IP scelta per nome o prima disponibile; ASG discordanti non corretti e confronto saltato se nessun ASG DR e trovato. Aggiungere il pool desiderato conserva quelli precedenti; senza LB sorgente non li rimuove. Un esito positivo non certifica policy o traffico coerenti. |
 | Lookup di riuso con `ErrorAction=SilentlyContinue`. | Snapshot, dischi, NIC e VM possono non restituire un oggetto anche per problemi di lettura. Il ramo di creazione non distingue esplicitamente risorsa assente da lookup fallito; rischia tentativi impropri, conflitti e diagnosi ambigue. |
-| Stato ricavato dai nomi dei log, indicizzati per solo nome VM. | VM omonime si confondono; vecchie esecuzioni con scritture tardive possono risultare le piu recenti. L'upload log fallito viene trattato come warning: risorse create ed esito mostrato possono divergere. |
+| Stato ricavato dai nomi dei log, indicizzati per workload completo. | Gli omonimi sono distinti, ma vecchie esecuzioni con scritture tardive possono risultare le piu recenti. L'upload log fallito resta warning: risorse create ed esito mostrato possono divergere. |
 | Nessun preflight completo o rollback. | Righe incomplete vengono scartate, duplicati e risorse fuori ambito non sono respinti preventivamente. Errori possono lasciare risorse parziali; i retry ripetono anche alcuni errori di autorizzazione/configurazione. |
 | Function key condivisa e identita con ambiti subscription. | Il client non ha autorizzazione applicativa per identita/singolo workload; i permessi delle UAMI possono coprire risorse oltre la bolla. Ingresso privato non dimostra isolamento dell'uscita o delle VM DR. |
-| Nessuno smantellamento, retention dei log Blob o test automatici del flusso DR nel repo target. | Pulizia, costi e conservazione dei dati richiedono procedure esterne. Parser/build, smoke check e test Terraform di naming non verificano replica completa o resistenza ai guasti. |
+| Nessuno smantellamento, retention dei log Blob o suite completa automatizzata degli stage DR. | Pulizia, costi e conservazione richiedono procedure esterne. I test locali coprono routing/contesti/stato; il lab separato prova fresh/reuse, non resistenza ai guasti o consistenza applicativa. |
 
-**Condotta attuale:** usare CSV piccoli, autorizzati e senza VM omonime, chiamate sequenziali e prerequisiti verificati. Dopo un timeout non ripetere la POST prima di verificare l'esecuzione precedente. Confrontare gli ID dei log, controllare direttamente risorse/avvio e provare il servizio applicativo. Sono mitigazioni operative, non una soluzione ai limiti sopra.
+**Condotta attuale:** usare CSV piccoli e autorizzati, chiamate sequenziali e prerequisiti verificati. Dopo un timeout non ripetere la POST prima di verificare l'esecuzione precedente. Confrontare gli ID dei log, controllare direttamente risorse/avvio e provare il servizio applicativo. Sono mitigazioni operative, non una soluzione ai limiti sopra.
 
 | Quale errore compare | Quale controllo effettuare |
 |---|---|
@@ -428,7 +454,7 @@ Le seguenti sono proposte, non funzionalita presenti. **Prima dell'uso enterpris
 
 | Quando intervenire | Quale modifica proporre | Quale prova ne verifica l'efficacia |
 |---|---|---|
-| Prima dell'uso enterprise. | Risolvere per riga nome primario + `-DR` in un ID DR univoco e autorizzato; poi eliminare la DR globale. | Due primarie raggiungono solo le rispettive DR; mapping assente/ambiguo blocca le scritture. |
+| Implementato e collaudato nella feature entro il perimetro disponibile. | Routing per primaria + suffisso, rifiuto di mapping non univoci e chiave log subscription/gruppo/VM; nessuna DR globale. | Due coppie/omonimi verificati localmente; fresh/reuse verificati in una coppia Azure. Il test Azure di due coppie richiede quattro subscription e resta distinto. |
 | Prima dell'uso enterprise. | Separare HTTP starter e job con Queue/worker o Durable Functions, workflow persistente; restituire ID/URL di stato e conservare stato, checkpoint e versione CSV. Verificare compatibilita, ruoli e costi. | Job oltre 230 secondi interrogabile per ID, anche dopo timeout/riavvio o scritture tardive. |
 | Prima dell'uso enterprise. | Chiave di idempotenza, lock distribuito per subscription/gruppo/VM e contesti Azure espliciti per tutte le operazioni. | POST sovrapposte non duplicano il workload e non cambiano contesto di operazioni altrui. |
 | Prima dell'uso enterprise. | Validare CSV, dimensione/numero/unicita righe e ambiti autorizzati; preflight di permessi, nomi/IP, prerequisiti, quota e operazioni previste. | Riga vietata, IP occupato o prerequisito mancante: errore esplicito e zero creazioni. |
@@ -442,7 +468,7 @@ Le seguenti sono proposte, non funzionalita presenti. **Prima dell'uso enterpris
 | In base a gestione e costi. | Retry solo per errori transienti, checkpoint, cleanup su soli ID del job, retention snapshot/log e alert per attivazione. | Guasti rilevati e residui censiti; cleanup conserva sorgenti, prerequisiti e risorse estranee. |
 | A ogni modifica. | Test automatici con Azure mock e ambiente dedicato per mapping, stati, riuso, errori e concorrenza; pipeline con secret scanning e verifica dipendenze. | Regressioni/segreti bloccati; guasti e ripristino verificati, non solo esiti HTTP. |
 
-Punto di partenza piu semplice: correggere routing multi-DR e preflight, rendere univoci job e stato, impedire sovrapposizioni. Una riscrittura o servizi aggiuntivi vanno introdotti solo per coprire requisiti confermati, con costo operativo esplicito. Queste proposte non sono ancora implementate.
+Punto di partenza piu semplice: completare il collaudo multi-DR e il preflight, rendere univoci job e stato, impedire sovrapposizioni. Una riscrittura o servizi aggiuntivi vanno introdotti solo per coprire requisiti confermati, con costo operativo esplicito. Le altre proposte non sono ancora implementate.
 
 ## Riferimenti
 
