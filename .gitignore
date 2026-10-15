@@ -2,10 +2,12 @@
 *.tfstate
 *.tfstate.*
 *.tfplan
+/terraform/tfplan
 *.tfvars
 *.tfvars.json
 *.csv
 !examples/vms.csv
+!examples/vms-multisubscription.csv
 local.settings.json
 function-app/Modules/Az.*/
 out/
@@ -14,3 +16,6 @@ out/
 .DS_Store
 /README-OLD.md
 /README-V2-OLD.md
+/.azure/
+/.lab/
+/.vscode/

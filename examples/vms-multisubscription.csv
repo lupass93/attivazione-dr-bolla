@@ -1,0 +1,3 @@
+SourceSubscription,SourceResourceGroup,SourceVmName
+site-a,rg-web,vm-web
+site-b,rg-web,vm-web

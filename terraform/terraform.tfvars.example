@@ -1,5 +1,4 @@
 hosting_subscription_id = "00000000-0000-0000-0000-000000000000"
-dr_subscription_id      = "00000000-0000-0000-0000-000000000000"
 resource_group_name     = "existing-hosting-rg"
 storage_account_name    = "existingstorageaccount"
 source_identity_name    = "existing-source-storage-identity"
@@ -9,6 +8,8 @@ location                = "italynorth"
 vnet_address_space      = ["10.80.0.0/24"]
 integration_subnet_prefix       = "10.80.0.0/27"
 private_endpoints_subnet_prefix = "10.80.0.32/27"
+target_subscription_suffix     = "-DR"
+target_name_suffix             = "-DR"
 
 resource_names = {
 	virtual_network                         = "vnet-client-functions"
