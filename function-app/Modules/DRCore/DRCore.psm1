@@ -39,7 +39,7 @@ function Get-RbacHint {
     param([System.Exception]$Exception)
     if ($Exception.Message -match 'AuthorizationFailed|Forbidden|does not have authorization|insufficient privileges|Access denied') {
         return ('RBAC hint: Ensure the managed identity has Reader on source subscription/RG, ' +
-                'Contributor on target snapshot/disk/VM RGs, Network Contributor on target VNet RG, ' +
+            'Contributor on target disk/VM RGs, Network Contributor on target VNet RG, ' +
                 'and Reader on target DES RG.')
     }
     return $null
@@ -298,9 +298,9 @@ function Invoke-VMReplication {
     .PARAMETER SourceVmName
         Exact name of the source VM to replicate.
     .PARAMETER SnapshotNamePrefix
-        Prefix prepended to snapshot names. Default: 'snap-'.
+        Retained for compatibility; snapshots are no longer created.
     .PARAMETER DiskParallelThrottle
-        Max concurrent snapshot creation operations. Default: 6.
+        Retained for compatibility; managed disk copies run sequentially.
     .PARAMETER AdditionalTags
         Extra tags to add to the target VM.
     .PARAMETER BackendPoolNameOverride
@@ -428,7 +428,7 @@ function Invoke-VMReplication {
 
         # Derived target resource groups
         $targetVmRg = "${SourceResourceGroup}${effRgSuffix}"
-        $targetSnapDiskRg = $targetVmRg
+        $targetDiskRg = $targetVmRg
 
         # ── Stage A: Discover source VM configuration ───────────────────────────
         $currentStage = 'A'
@@ -572,6 +572,7 @@ function Invoke-VMReplication {
         [void]$diskList.Add([pscustomobject]@{
             Name                       = $osDisk.Name
             SourceDiskId               = $osDisk.Id
+            SourceLocation             = [string]$osDisk.Location
             Role                       = 'OS'
             Lun                        = $null
             Caching                    = [string]$osAttach.Caching
@@ -601,6 +602,7 @@ function Invoke-VMReplication {
             [void]$diskList.Add([pscustomobject]@{
                 Name                       = $dDisk.Name
                 SourceDiskId               = $dDisk.Id
+                SourceLocation             = [string]$dDisk.Location
                 Role                       = 'Data'
                 Lun                        = [int]$dAttach.Lun
                 Caching                    = [string]$dAttach.Caching
@@ -625,9 +627,9 @@ function Invoke-VMReplication {
                    "TargetSub='$($targetSub.Name)' | TargetRG='$targetVmRg' | " +
                    "TargetVNet='$targetVnetName' | TargetDES='$targetDesName'") -VmName $SourceVmName
 
-        # ── Stage B: Create DES-encrypted snapshots in target subscription (parallel) ──
+        # Stage B: Validate direct managed disk copy before creating target resources
         $currentStage = 'B'
-        Write-Log 'Stage B: Creating/reusing encrypted snapshots in target subscription.' -VmName $SourceVmName
+        Write-Log 'Stage B: Validating direct managed disk copy.' -VmName $SourceVmName
         Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
 
         # Get DES first (must exist) to determine target location
@@ -637,114 +639,33 @@ function Invoke-VMReplication {
         if ($null -eq $des) { throw "Target DES '$targetDesName' not found in RG '$targetDesRg'." }
 
         $targetLocation = $des.Location
-        Write-Log "Target location: $targetLocation (from DES). Target RG: '$targetSnapDiskRg' (must pre-exist)." -VmName $SourceVmName
-
-        # Parallel snapshot creation — each iteration runs in its own runspace
-        $snapshotResults = $diskInfos | ForEach-Object -ThrottleLimit $DiskParallelThrottle -Parallel {
-            $disk           = $_
-            $tSubId         = $using:targetSub.Id
-            $tSnapRg        = $using:targetSnapDiskRg
-            $tLocation      = $using:targetLocation
-            $tDesId         = $using:des.Id
-            $snapPrefix     = $using:SnapshotNamePrefix
-            $ErrorActionPreference = 'Stop'
-
-            # Inline helpers (not available across runspace boundary)
-            function _retry {
-                param([scriptblock]$sb, [string]$op)
-                $attempt = 0
-                while ($true) {
-                    $attempt++
-                    try { return & $sb }
-                    catch {
-                        $retryable = $_.Exception.Message -match '429|TooManyRequests|temporar|timeout|throttl|InternalServerError|Conflict|Gateway|BadRequest|subscription|context|authorization'
-                        if ($attempt -ge 5 -or -not $retryable) {
-                            throw "[$op] failed after $attempt attempt(s): $($_.Exception.Message)"
-                        }
-                        Start-Sleep -Seconds ([Math]::Min(30, [int](2 * [Math]::Pow(2, ($attempt - 1)))))
-                    }
-                }
-            }
-            function _norm { param([string]$v); if ([string]::IsNullOrWhiteSpace($v)) { return '' }; return $v.Trim().ToLowerInvariant() }
-
-            Import-Module Az.Accounts -ErrorAction Stop
-            Import-Module Az.Compute  -ErrorAction Stop
-            if ($env:MSI_SECRET -or $env:IDENTITY_ENDPOINT) {
-                Disable-AzContextAutosave -Scope Process | Out-Null
-                $snapshotContext = _retry -op "Connect-AzAccount with managed identity" -sb {
-                    (Connect-AzAccount -Identity -AccountId $env:TARGET_IDENTITY_CLIENT_ID `
-                        -Subscription $tSubId -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
-                }
-            }
-
-            # Set and verify target subscription context with retry
-            _retry -op "Set-AzContext to $tSubId" -sb {
-                $null = Set-AzContext -Context $snapshotContext -Scope Process -ErrorAction Stop
-                # Verify context immediately after setting
-                $currentContext = Get-AzContext
-                if ($currentContext.Subscription.Id -ne $tSubId) {
-                    throw "Failed to switch to target subscription. Expected: $tSubId, Current: $($currentContext.Subscription.Id)"
-                }
-            }
-
-            $snapName = "$snapPrefix$($disk.Name)"
-            $existing = Get-AzSnapshot -ResourceGroupName $tSnapRg -SnapshotName $snapName -DefaultProfile $snapshotContext -ErrorAction SilentlyContinue
-            if ($existing) {
-                # Snapshots are always regional (no zones), verify source disk and DES only
-                $ok = (_norm $existing.CreationData.SourceResourceId) -eq (_norm $disk.SourceDiskId) -and
-                      (_norm $existing.Encryption.DiskEncryptionSetId) -eq (_norm $tDesId)
-                if (-not $ok) { throw "Snapshot '$snapName' exists but configuration does not match (source disk or DES)." }
-                return [pscustomobject]@{ DiskName = $disk.Name; SnapshotName = $snapName; SnapshotId = $existing.Id; Status = 'Reused' }
-            }
-
-            # Snapshots are always regional, zones are NOT supported
-            $cfgArgs = @{
-                Location            = $tLocation
-                CreateOption        = 'Copy'
-                SourceResourceId    = $disk.SourceDiskId
-                DiskEncryptionSetId = $tDesId
-            }
-
-            $cfg     = _retry -op "New-AzSnapshotConfig $snapName" -sb { New-AzSnapshotConfig @cfgArgs -ErrorAction Stop }
-            $newSnap = _retry -op "New-AzSnapshot $snapName"       -sb { New-AzSnapshot -ResourceGroupName $tSnapRg -SnapshotName $snapName -Snapshot $cfg -DefaultProfile $snapshotContext -ErrorAction Stop }
-
-            [pscustomobject]@{ DiskName = $disk.Name; SnapshotName = $snapName; SnapshotId = $newSnap.Id; Status = 'Created' }
+        $targetEncryptionType = [string](Get-OptionalProp -Object $des -PropertyName 'EncryptionType')
+        if ($targetEncryptionType -notin @('EncryptionAtRestWithCustomerKey', 'EncryptionAtRestWithPlatformAndCustomerKeys')) {
+            throw "Target DES '$targetDesName' must specify a supported customer-managed encryption type."
         }
-
-        # Re-establish target subscription context in main thread after parallel processing
-        Write-Log "Re-establishing target subscription context after parallel snapshot creation." -VmName $SourceVmName
-        Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
-
-        # Verify and log current context
-        $currentCtx = Get-AzContext
-        Write-Log "Stage B post-parallel context verified: $($currentCtx.Subscription.Name) ($($currentCtx.Subscription.Id))" -VmName $SourceVmName
-        if ($currentCtx.Subscription.Id -ne $targetSub.Id) {
-            throw "Stage B post-parallel context mismatch! Expected: $($targetSub.Id), Current: $($currentCtx.Subscription.Id)"
+        Write-Log "Target location: $targetLocation (from DES). Target RG: '$targetDiskRg' (must pre-exist)." -VmName $SourceVmName
+        $sourceTenantId = [string]$script:SourceContext.Tenant.Id
+        $targetTenantId = [string]$script:TargetContext.Tenant.Id
+        if ([string]::IsNullOrWhiteSpace($sourceTenantId) -or [string]::IsNullOrWhiteSpace($targetTenantId) -or
+            (Normalize $sourceTenantId) -ne (Normalize $targetTenantId)) {
+            throw 'Direct managed disk copy requires source and target subscriptions in the same Microsoft Entra tenant.'
         }
-
-        $snapshotByDiskName = @{}
-        foreach ($r in $snapshotResults) {
-            if ($r.Status -eq 'Created') {
-                [void]$summary.SnapshotsCreated.Add($r.SnapshotName)
-                Write-Log "  Snapshot created: '$($r.SnapshotName)'" -VmName $SourceVmName
-            } else {
-                [void]$summary.SnapshotsReused.Add($r.SnapshotName)
-                Write-Log "  Snapshot reused:  '$($r.SnapshotName)'" -VmName $SourceVmName
-            }
-            $snapshotByDiskName[$r.DiskName] = Invoke-WithRetry -Operation "Get-AzSnapshot $($r.SnapshotName)" -ScriptBlock {
-                Get-AzSnapshot -ResourceGroupName $targetSnapDiskRg -SnapshotName $r.SnapshotName -DefaultProfile $script:TargetContext -ErrorAction Stop
+        foreach ($disk in $diskInfos) {
+            if ([string]::IsNullOrWhiteSpace($disk.SourceLocation) -or
+                (Normalize $disk.SourceLocation) -ne (Normalize $targetLocation)) {
+                throw "Direct managed disk copy requires the same region. Source disk '$($disk.Name)' is in '$($disk.SourceLocation)'; target DES is in '$targetLocation'. Cross-region copy is not supported by this workflow."
             }
         }
-        Write-Log "Stage B complete. Snapshots=$($snapshotResults.Count)" -VmName $SourceVmName
+        Write-Log 'Stage B complete. Direct copy validated; no snapshots are created or reused.' -VmName $SourceVmName
 
         # Upload Stage B log
-        Upload-StageLog -VmName $SourceVmName -StageId 'B' -StageDescription 'Snapshots' -Failed $false `
+        Upload-StageLog -VmName $SourceVmName -StageId 'B' -StageDescription 'DiskCopyValidation' -Failed $false `
             -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
-        # ── Stage C: Create managed disks from snapshots ────────────────────────
+        # Stage C: Create managed disks directly from source managed disks
         $currentStage = 'C'
-        Write-Log 'Stage C: Creating/reusing managed disks.' -VmName $SourceVmName
+        Write-Log 'Stage C: Creating/reusing managed disks directly from source managed disks.' -VmName $SourceVmName
         Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
 
         # Verify and log current context
@@ -761,30 +682,32 @@ function Invoke-VMReplication {
 
         $targetDisksByName = @{}
         foreach ($disk in $diskInfos) {
-            $snapshot = $snapshotByDiskName[$disk.Name]
-            if ($null -eq $snapshot) { throw "Snapshot object not found for disk '$($disk.Name)'." }
-
-            $existingDisk = Get-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
+            $existingDisk = Get-AzDisk -ResourceGroupName $targetDiskRg -DiskName $disk.Name -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
             if ($existingDisk) {
-                $ok = (Normalize $existingDisk.CreationData.SourceResourceId) -eq (Normalize $snapshot.Id) -and
+                $ok = (Normalize $existingDisk.CreationData.SourceResourceId) -eq (Normalize $disk.SourceDiskId) -and
+                      (Normalize $existingDisk.Location) -eq (Normalize $targetLocation) -and
+                      (Normalize $existingDisk.ProvisioningState) -eq 'succeeded' -and
                       (Normalize $existingDisk.Sku.Name)  -eq (Normalize $disk.SkuName) -and
                       (Normalize (Get-OptionalProp -Object $existingDisk.Encryption -PropertyName 'DiskEncryptionSetId')) -eq (Normalize $des.Id) -and
+                      (Normalize $existingDisk.Encryption.Type) -eq (Normalize $targetEncryptionType) -and
                       (Compare-StringArrays -A @($existingDisk.Zones) -B @($disk.Zones)) -and
                       ([int](Get-OptionalProp -Object $existingDisk -PropertyName 'MaxShares')) -eq ([int]$disk.MaxShares)
                 if (-not $ok) {
-                    throw "Disk '$($disk.Name)' exists but configuration does not match (snapshot/SKU/DES/zones/shares)."
+                    throw "Disk '$($disk.Name)' exists but configuration does not match (source disk/location/provisioning/SKU/DES/encryption/zones/shares). Disks created from snapshots cannot be resumed in direct-copy mode; no existing disk is overwritten or deleted."
                 }
                 $targetDisksByName[$disk.Name] = $existingDisk
                 [void]$summary.DisksReused.Add($disk.Name)
+                Write-Log "  Disk reused: '$($disk.Name)'. Contents are not refreshed from the source." -VmName $SourceVmName
                 continue
             }
 
             $cfgArgs = @{
                 Location            = $targetLocation
                 CreateOption        = 'Copy'
-                SourceResourceId    = $snapshot.Id
+                SourceResourceId    = $disk.SourceDiskId
                 SkuName             = $disk.SkuName
                 DiskEncryptionSetId = $des.Id
+                EncryptionType      = $targetEncryptionType
             }
             if ($supportsTier -and -not [string]::IsNullOrWhiteSpace($disk.Tier)) { $cfgArgs['Tier'] = $disk.Tier }
             if ($supportsZone -and $disk.Zones -and $disk.Zones.Count -gt 0)      { $cfgArgs['Zone'] = @($disk.Zones) }
@@ -795,10 +718,11 @@ function Invoke-VMReplication {
 
             $diskConfig = Invoke-WithRetry -Operation "New-AzDiskConfig $($disk.Name)" -ScriptBlock { New-AzDiskConfig @cfgArgs -ErrorAction Stop }
             $newDisk    = Invoke-WithRetry -Operation "New-AzDisk $($disk.Name)" -ScriptBlock {
-                New-AzDisk -ResourceGroupName $targetSnapDiskRg -DiskName $disk.Name -Disk $diskConfig -DefaultProfile $script:TargetContext -ErrorAction Stop
+                New-AzDisk -ResourceGroupName $targetDiskRg -DiskName $disk.Name -Disk $diskConfig -DefaultProfile $script:TargetContext -ErrorAction Stop
             }
             $targetDisksByName[$disk.Name] = $newDisk
             [void]$summary.DisksCreated.Add($disk.Name)
+            Write-Log "  Disk created: '$($disk.Name)' directly from '$($disk.SourceDiskId)'." -VmName $SourceVmName
         }
         Write-Log "Stage C complete. Disks=$($diskInfos.Count)" -VmName $SourceVmName
 

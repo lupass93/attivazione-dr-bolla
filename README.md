@@ -4,7 +4,7 @@ Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure
 
 > Questa soluzione deriva dalla copia corretta di [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla). Il README descrive il codice attuale; le migliorie indicate come proposte non sono implementate.
 
-**Branch principale:** questo README riguarda `delivery`, che integra la capacita multisubscription sviluppata in `feature/multisubscription-dr`. Il flusso di questo branch usa ancora snapshot intermedi. La copia diretta dei managed disk, senza snapshot, viene mantenuta separatamente nel branch `feature/create-directy-manageddisk-dr-without-snapshot`.
+**Branch dedicato:** questo README riguarda `feature/create-directy-manageddisk-dr-without-snapshot`, creato da `delivery` dopo il merge di `feature/multisubscription-dr`. Questo branch conserva il routing multisubscription e crea i managed disk DR direttamente dai managed disk primari, senza snapshot intermedi. Il branch `delivery` mantiene invece il percorso con snapshot.
 
 ## Indice
 
@@ -29,7 +29,7 @@ Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure
 
 ## Architettura e risorse
 
-`Invoke-DRReplication` legge il CSV, individua VM/rete/dischi sorgenti, crea snapshot e dischi cifrati, ricrea NIC e VM e collega i backend pool. Una Network Interface (NIC) e l'interfaccia di rete della VM. `Get-DRStatus` legge CSV e log senza creare risorse.
+Un managed disk e un disco gestito da Azure; uno snapshot e una copia puntuale del disco conservata come risorsa separata. `Invoke-DRReplication` legge il CSV, individua VM/rete/dischi sorgenti, copia direttamente i managed disk primari nei dischi DR cifrati, ricrea NIC e VM e collega i backend pool. Non legge, crea o riusa snapshot. Una Network Interface (NIC) e l'interfaccia di rete della VM. `Get-DRStatus` legge CSV e log senza creare risorse.
 
 Le due Application Programming Interface (API), interfacce di chiamata HTTP, usano Azure Resource Manager (ARM), il management endpoint Azure, per leggere e creare risorse. La replica non trasferisce file via sessioni remote nelle VM e non richiede peering al primario per queste operazioni di management. Il percorso privato verso Function e storage resta invece necessario ai client.
 
@@ -59,7 +59,7 @@ La Function ricostruisce il workload dentro un ambiente gia predisposto; non rep
 | Load Balancer e backend pool DR, se il primario usa un Load Balancer. | Load Balancer/Resource Group con suffisso e pool selezionabile dal codice. Regole, probe, frontend e criteri di traffico devono essere gia configurati e verificati. |
 | DES e Key Vault/chiave DR. | Il disco OS sorgente deve avere un DES. Nome e Resource Group di quel DES, con suffisso, individuano il DES DR; la sua regione determina quella delle nuove risorse workload. Verificare chiave valida, identita DES autorizzata e accesso al vault. |
 | Policy di rete e capacita DR. | Network Security Group (NSG), cioe regole di traffico, routing, DNS e uscita coerenti con l'isolamento richiesto; disponibilita del modello VM, quota e compatibilita dei dischi. Non vengono ricopiati automaticamente. |
-| Compatibilita di copia e regione. | Il codice usa `Copy` direttamente dal disco, non una pipeline di trasferimento cross-region. Verificare il supporto dell'operazione per dischi, cifratura e regioni effettive; il solo cambio di `location` non certifica DR geografico. |
+| Compatibilita di copia e regione. | Il codice richiede subscription nello stesso tenant Microsoft Entra e ogni disco primario nella stessa regione del DES DR. Lo stage B rifiuta una destinazione cross-region prima di creare dischi. Questa copia diretta non costituisce DR geografico. |
 
 Coerenza non significa copia integrale: il codice preserva solo le proprieta esplicitamente gestite. La presenza delle risorse non certifica permessi, isolamento di rete, disponibilita applicativa o consistenza dei dati.
 
@@ -78,7 +78,7 @@ Tutti i nomi seguenti sono fittizi. Il nome DR viene risolto per ogni primaria u
 
 ### Esempi dei nomi delle risorse DR
 
-Esempio di una VM di `sub-site-a` ripristinata in `sub-site-a-DR`, con `target_name_suffix=-DR` per i suffissi configurati e `SNAPSHOT_NAME_PREFIX=snap-`. VM, dischi, snapshot e NIC di destinazione risiedono in `rg-site-a-vm-DR`. La naming convention si applica alle risorse Azure, non ai nomi dei computer o delle applicazioni dentro le VM.
+Esempio di una VM di `sub-site-a` ripristinata in `sub-site-a-DR`, con `target_name_suffix=-DR` per i suffissi configurati. VM, dischi e NIC di destinazione risiedono in `rg-site-a-vm-DR`; non vengono creati snapshot. La naming convention si applica alle risorse Azure, non ai nomi dei computer o delle applicazioni dentro le VM.
 
 | Quale risorsa o riferimento considerare | Nome o valore sorgente di esempio | Nome o valore DR di esempio | Quale regola applica il codice |
 |---|---|---|---|
@@ -102,15 +102,13 @@ Esempio di una VM di `sub-site-a` ripristinata in `sub-site-a-DR`, con `target_n
 | Virtual Machine. | `vm-web-01` | `vm-web-01` | Stesso nome, nel Resource Group DR; nessun `-DR` sulla VM. |
 | Disco OS. | `vm-web-01-os` | `vm-web-01-os` | Stesso nome, nel gruppo della VM DR, anche se il disco sorgente era in un altro gruppo. |
 | Disco dati, LUN 0. | `vm-web-01-data0` | `vm-web-01-data0` | Stesso nome nel gruppo DR; LUN e caching sono preservati al collegamento. |
-| Snapshot del disco OS. | Disco `vm-web-01-os`; non uno snapshot sorgente. | `snap-vm-web-01-os` | `SNAPSHOT_NAME_PREFIX` + nome del disco sorgente, nel gruppo della VM DR. |
-| Snapshot del disco dati. | Disco `vm-web-01-data0`; non uno snapshot sorgente. | `snap-vm-web-01-data0` | Stessa regola dello snapshot OS. |
 | NIC primaria. | `nic-web-primary` | `vm-web-01-nic` | Nome della VM + `-nic`, non nome NIC sorgente + `-DR`. |
 | IP configuration primaria della NIC. | `ipconfig1` | `ipconfig1` | Stesso nome, nella nuova NIC DR. |
 | IP privato. | `10.90.1.10` | `10.90.1.10`, statico. | Stesso indirizzo; deve appartenere alla subnet DR ed essere libero. |
 
 Gli esempi organizzativi non introducono requisiti di nome nel codice: frontend, probe, regole, NSG, route table, Key Vault e chiave possono avere altri nomi se la configurazione DR e coerente. Public IP, altre NIC/IP, identita VM ed estensioni non hanno un naming DR derivato dalla Function: non vengono ricopiati esplicitamente.
 
-**Identita del workload:** i log usano `<ID-primaria>/<Resource-Group>/<nome-VM>/`, con nomi normalizzati. VM omonime in subscription/gruppi diversi sono distinte; nella stessa destinazione restano necessari nomi risorsa non collidenti. Gli snapshot hanno nomi stabili tra attivazioni e possono essere riusati senza rinnovare i dati.
+**Identita del workload:** i log usano `<ID-primaria>/<Resource-Group>/<nome-VM>/`, con nomi normalizzati. VM omonime in subscription/gruppi diversi sono distinte; nella stessa destinazione restano necessari nomi risorsa non collidenti. I dischi DR mantengono nomi stabili: il loro riuso non rinnova il contenuto dal primario.
 
 ### Esempi dei nomi dell'hosting Terraform
 
@@ -157,8 +155,7 @@ Il codice cerca le risorse nella subscription DR selezionata e nel Resource Grou
 
 | Quale risorsa considera | In quali condizioni la riusa | Come usa o modifica la risorsa esistente | Cosa fa se manca o non corrisponde |
 |---|---|---|---|
-| Snapshot, stage B. | Trova `<prefisso-snapshot><nome-disco>` nel gruppo DR della VM. Devono coincidere `CreationData.SourceResourceId` con l'ID del disco primario ed `Encryption.DiskEncryptionSetId` con l'ID del DES DR. | Restituisce l'ID dello snapshot con stato interno `Reused`; lo usa come sorgente dei dischi nello stage C. Non crea una nuova copia, non aggiorna lo snapshot e non controlla la sua eta. | Se non trovato, crea lo snapshot con `CreateOption=Copy` e DES DR. Se sorgente o DES differiscono, genera errore; non sovrascrive o elimina quello esistente. |
-| Dischi OS e dati, stage C. | Trova il nome del disco sorgente nel gruppo DR della VM. Devono coincidere ID dello snapshot selezionato, `Sku.Name`, ID DES, insieme delle zone e valore numerico `MaxShares`, numero di VM che possono condividere il disco. | Conserva oggetto e ID nel gruppo dei dischi DR. Se crea una nuova VM li collega con caching e LUN, indice del disco dati. Non ricopia dati dal primario e non riallinea proprieta o collegamenti di una VM gia esistente. | Se non trovato, crea dal relativo snapshot con DES/SKU; tier, zone e condivisione sono applicati se supportati. Un confronto fallito genera errore, senza sostituzione o detach automatico. |
+| Dischi OS e dati, stage C. | Trova il nome del disco sorgente nel gruppo DR della VM. Devono coincidere ID del managed disk primario, regione, `Sku.Name` (tipo di storage), DES e tipo di cifratura DR, zone e `MaxShares` (numero di VM che possono condividere il disco). Richiede `ProvisioningState=Succeeded`, cioe creazione completata. | Conserva oggetto e ID nel gruppo dei dischi DR, senza aggiornare il contenuto dal primario. Se crea una nuova VM li collega con caching e LUN, indice del disco dati. Non riconfigura una VM gia esistente. | Se manca, crea con `CreateOption=Copy` e `SourceResourceId` uguale all'ID del disco primario, applicando cifratura del DES DR e tipo di storage; tier, zone e condivisione sono applicati se supportati. Un confronto fallito, incluso un disco derivato da snapshot, genera errore senza sostituzione o detach automatico. |
 | NIC e IP privato, stage D. | Trova `<nome-VM>-nic` nel gruppo DR. Seleziona la IP configuration col nome sorgente, altrimenti la prima. Devono coincidere ID subnet, allocazione `Static` e IP sorgente. Gli ASG sono confrontati solo se almeno un ASG DR e stato trovato; una differenza produce warning, non rifiuto. | Conserva NIC e configurazione IP senza correggere gli ASG, i tag o altre impostazioni. Ne usa l'ID per una nuova VM. Nello stage E puo aggiornare soltanto l'associazione al backend pool previsto. | Se non trovata, crea una NIC con IP sorgente statico e ASG DR trovati. Subnet, allocazione o IP diversi generano errore; ASG mancanti/discordanti possono invece lasciare proseguire il lavoro. |
 | Virtual Machine, stage D. | Trova il nome della VM sorgente nel gruppo DR. Controlla soltanto `HardwareProfile.VmSize` e l'ID del managed disk OS, che deve essere quello selezionato nello stage C. | Mantiene la VM senza riconfigurare dischi dati, NIC, tag, identita o boot diagnostics. Non la avvia se e spenta e non controlla provisioning, guest o applicazione. Prosegue verso lo stage E. | Se non trovata, crea con NIC/dischi DR, caching/LUN, nome/dimensione sorgenti, tag e boot diagnostics. Size o disco OS discordanti generano errore; nessuna sostituzione automatica. |
 | Associazione NIC/backend pool, stage E. | Se la sorgente usa un Load Balancer, trova Load Balancer/pool DR secondo la selezione descritta sopra. Nella IP configuration col nome sorgente, altrimenti la prima, cerca l'ID del pool tra quelli gia associati. | Se l'ID e gia presente, registra `BackendPoolAlreadyMember` e non aggiorna la NIC. Altrimenti aggiunge il pool ai collegamenti esistenti, salva la NIC e rilegge per verificare la presenza dell'ID. Non crea il pool e non rimuove gli altri pool. | Pool/LB mancanti o selezione ambigua generano errore. Senza LB sorgente salta lo stage di associazione; non rimuove eventuali pool gia presenti sulla NIC riusata. |
@@ -167,9 +164,10 @@ Gli ID e le stringhe dei confronti vengono normalizzati per spazi e maiuscole/mi
 
 - **Prerequisiti:** Resource Group, VNet/subnet, ASG, Load Balancer/pool e DES devono esistere e sono usati tramite nomi/ID risolti. Regole/probe e Key Vault/chiave restano configurazioni esterne, non risorse create o riconciliate dalla Function.
 - **Esiti e risorse parziali:** scrive log per stage e marker finale. Un errore blocca quella replica, ma non esegue rollback delle risorse gia create; altre righe del CSV possono proseguire.
-- **Ripetere non significa aggiornare:** un nuovo `invocationId` puo riusare lo stesso snapshot e gli stessi dischi/VM. Non rinnova i dati del ripristino, e i nuovi dischi creati nello stage C non vengono automaticamente collegati a una VM riusata.
+- **Ripetere non significa aggiornare:** un nuovo `invocationId` puo riusare gli stessi dischi/VM senza rinnovarne il contenuto. Per un nuovo ripristino occorre predisporre una destinazione distinta o autorizzare un reset delle sole risorse DR della bolla; questa feature non esegue reset e non introduce una generazione esplicita del ripristino.
+- **Passaggio dal vecchio comportamento:** snapshot esistenti non vengono letti o eliminati. Un disco DR creato da snapshot viene rifiutato perche la sua sorgente non e il managed disk primario. Non eliminare dischi collegati a VM; la transizione richiede un piano operativo autorizzato.
 
-I controlli sono in [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1#L621), nei rami degli stage B-E. `Get-DRStatus` interpreta i log: non crea, corregge o verifica direttamente queste risorse e non distingue una ricostruzione nuova da un riuso sulla base del solo marker di successo.
+I controlli sono in [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1), nei rami degli stage B-E. `Get-DRStatus` interpreta i log: non crea, corregge o verifica direttamente queste risorse e non distingue una ricostruzione nuova da un riuso sulla base del solo marker di successo.
 
 ## Come opera Invoke-DRReplication
 
@@ -181,13 +179,15 @@ I controlli sono in [DRCore.psm1](function-app/Modules/DRCore/DRCore.psm1#L621),
 | 2. Scarica e valida il CSV con UAMI1. | Legge il container CSV configurato, default `dr-configs`, verifica le tre colonne e scarta righe incomplete con warning. Nessun preflight completo o controllo duplicati. |
 | 3. Avvia il lavoro per riga. | Usa un `invocationId` comune e VM sequenziali; UAMI1 seleziona la primaria della riga e UAMI2 la DR risolta per quella primaria. Nessuna operazione workload avviene se la risoluzione DR fallisce. |
 | 4. Stage A: scopre la sorgente. | Legge VM, NIC/IP primari, ASG, pool, dischi OS/dati e DES OS; deriva nomi/gruppi DR. Non congela le scritture applicative. |
-| 5. Stage B: snapshot. | UAMI2 copia ogni disco primario in uno snapshot con DES DR, o riusa quello con sorgente/DES corrispondenti. Serve autorizzazione sulla sorgente alla stessa UAMI2. |
-| 6. Stage C: dischi. | Crea managed disk dagli snapshot. Per il riuso confronta snapshot, SKU, DES, zone e condivisione, non tutte le proprieta. |
+| 5. Stage B: valida la copia diretta. | Legge il DES DR e il suo tipo di cifratura; verifica tenant comune e stessa regione per tutti i dischi. Non crea snapshot. |
+| 6. Stage C: copia i dischi. | UAMI2 crea ogni managed disk direttamente dal disco primario con la cifratura del DES DR. La stessa UAMI2 deve essere autorizzata sulla sorgente. Il riuso richiede sorgente diretta, regione, provisioning completato, tipo di storage, DES/cifratura, zone e condivisione coerenti. |
 | 7. Stage D: NIC e VM. | Usa subnet/ASG DR, IP statico sorgente, dischi/caching/LUN, nome e dimensione VM sorgenti. Il riuso VM controlla solo dimensione e ID disco OS. |
 | 8. Stage E: backend pool. | Se la sorgente ha un Load Balancer, seleziona un pool DR esistente, aggiorna la NIC e verifica l'associazione; altrimenti salta questo collegamento. |
 | 9. Registra l'esito. | Scrive log per stage e marker `Completed` o fallimento. Errori per VM possono lasciare risorse parziali; la POST non restituisce gli esiti dettagliati delle VM. |
 
 **Non e un job asincrono persistente:** `Push-OutputBinding` prepara il 202, ma lo script prosegue nella stessa invocazione e risponde quando termina. I commenti di risposta immediata sono inesatti. Il 202 non certifica tutte le VM; dopo un timeout l'esecuzione potrebbe essere ancora attiva.
+
+`SNAPSHOT_NAME_PREFIX`, `PARALLEL_THROTTLE` e i corrispondenti parametri del modulo restano accettati per compatibilita, ma non creano snapshot o parallelismo dei dischi: le copie dei dischi sono sequenziali. Anche gli elenchi `SnapshotsCreated` e `SnapshotsReused` rimangono nel riepilogo, sempre vuoti. Gli identificatori degli stage A-E restano invariati; lo stage B registra `DiskCopyValidation`, la verifica dei prerequisiti della copia.
 
 Fonti del comportamento: [handler HTTP](function-app/Invoke-DRReplication/run.ps1) e [stage A-E in DRCore](function-app/Modules/DRCore/DRCore.psm1).
 
@@ -221,7 +221,7 @@ Completare questi controlli prima di applicare Terraform; quelli sui nuovi endpo
 - [ ] **Permessi:** verificare le matrici sotto, gli scope effettivi e la propagazione delle assegnazioni. Controllare anche Azure Policy, deny assignment e resource lock; un ruolo assegnato non supera un divieto della piattaforma.
 - [ ] **Storage:** verificare un account StorageV2 che supporti Blob/Queue/Table, TLS 1.2, accesso pubblico/anonimo e shared key disabilitati. Per UAMI1 verificare Blob Data Owner per l'host e Table Data Contributor per la diagnostica host. Queue Data Contributor e suggerito per possibili evoluzioni, non un requisito bloccante dei due trigger HTTP attuali; il supporto del servizio nell'account non prova che la Function lo utilizzi.
 - [ ] **Rete e postazione:** predisporre connettivita e DNS verso la nuova VNet. Dopo l'apply verificare Function, nome `scm` di pubblicazione e storage sui rispettivi IP privati. Consentire HTTPS verso autenticazione/management Azure, Terraform Registry e PowerShell Gallery. La sola autenticazione Azure non fornisce accesso privato.
-- [ ] **Bolla DR e cifratura:** verificare nomi coerenti con `target_name_suffix`, subnet con gli IP sorgenti liberi, ASG e pool esistenti. DES, VM/dischi/snapshot DR devono essere compatibili per regione/subscription; Key Vault con soft delete e purge protection, chiave attiva e identita DES autorizzata a usarla. Con RBAC usare Key Vault Crypto Service Encryption User sulla chiave/vault, oppure access policy `get`, `wrapKey`, `unwrapKey`. Verificare firewall/trusted services del vault; l'identita DES e distinta dalle UAMI della Function.
+- [ ] **Bolla DR e cifratura:** verificare nomi coerenti con `target_name_suffix`, subnet con gli IP sorgenti liberi, ASG e pool esistenti. Tutti i dischi primari devono essere nella stessa regione del DES DR e le subscription nello stesso tenant. Il DES deve dichiarare cifratura con chiave cliente, con eventuale secondo livello a chiave piattaforma. Key Vault deve avere soft delete e purge protection, chiave attiva e identita DES autorizzata a usarla. Con RBAC usare Key Vault Crypto Service Encryption User sulla chiave/vault, oppure access policy `get`, `wrapKey`, `unwrapKey`. Verificare firewall/trusted services del vault; l'identita DES e distinta dalle UAMI della Function.
 - [ ] **Strumenti e disponibilita:** installare Git, Terraform >= 1.9, Azure CLI e PowerShell 7.6. Verificare quota/modello VM in DR e disponibilita regionale di Flex Consumption. Registrare i provider hosting `Microsoft.Web`, `Microsoft.App`, `Microsoft.Network`, `Microsoft.Storage`, `Microsoft.ManagedIdentity`, `Microsoft.Insights`, `Microsoft.OperationalInsights`; per DR, `Microsoft.Compute`, `Microsoft.Network`, `Microsoft.KeyVault`.
 
 Per un pre-check tracciabile, annotare **identita, ruolo, scope e risultato**. Se manca un controllo, risolverlo prima della fase che ne dipende; non aprire gli endpoint pubblici come workaround.
@@ -258,11 +258,12 @@ Application Insights e workspace sono creati da Terraform. Se non esistono ancor
 |---|---|---|
 | Reader | Subscription DR e subscription contenenti prerequisiti DR referenziati. | Lettura di rete, DES, Load Balancer e gruppi di destinazione. |
 | Virtual Machine Contributor | Subscription DR. | Creazione e gestione di VM e dischi DR. |
-| Disk Snapshot Contributor | Subscription DR. | Creazione e gestione degli snapshot DR. |
 | Network Contributor | Subscription DR e subscription della rete DR, se diversa. | NIC e collegamenti a subnet, ASG e backend pool. |
-| Disk Backup Reader | Ogni subscription primaria contenente i dischi da copiare. | Accesso ai dischi sorgenti necessario alla copia dello snapshot. |
+| Disk Backup Reader | Ogni subscription primaria contenente i dischi da copiare. | Accesso ai dischi sorgenti per la copia diretta nella DR. |
 
 I permessi delle due identita **non si sommano**: la UAMI DR deve avere `Microsoft.Compute/disks/beginGetAccess/action` sulla sorgente, incluso in Disk Backup Reader. Reader da solo non basta. Gli scope subscription DR/primario restano quelli concordati; autorizzano anche risorse estranee alla bolla e devono essere approvati dal gestore.
+
+Il nuovo flusso non richiede operazioni `Microsoft.Compute/snapshots/*` o il ruolo Disk Snapshot Contributor per creare snapshot. Questa modifica non revoca assegnazioni esistenti: eventuali riduzioni dei permessi richiedono verifica degli altri utilizzatori dell'identita.
 
 Il requisito tecnico riguarda i permessi sui dischi sorgenti: Disk Backup Reader puo essere assegnato anche ai soli dischi o ai Resource Group che li contengono. Non aggiungerlo se UAMI2 ha gia permessi equivalenti. L'ambito subscription e una scelta operativa piu ampia, non un requisito della copia. Lo stesso principio vale per Monitoring Metrics Publisher o permessi equivalenti sulla risorsa Application Insights, non sul solo workspace.
 
@@ -298,11 +299,11 @@ Eseguire i comandi in **PowerShell 7.6**, dalla postazione autorizzata con perco
 
 ### 1. Selezionare e configurare
 
-Clonare il branch `delivery`, che include il routing multisubscription, oppure usare un checkout locale pulito di quel branch. Verificarne il nome prima del deployment. La copia diretta senza snapshot e separata nel branch `feature/create-directy-manageddisk-dr-without-snapshot`; selezionarlo solo per il collaudo autorizzato di quella feature.
+Clonare il branch `feature/create-directy-manageddisk-dr-without-snapshot` in una directory separata oppure usare un checkout locale pulito di quel branch. Verificarne il nome prima del deployment: include il routing multisubscription di `delivery` e la copia diretta senza snapshot. Il deployment e il collaudo Azure richiedono autorizzazione separata.
 
 ```powershell
-git clone --branch delivery --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla
-Set-Location attivazione-dr-bolla
+git clone --branch feature/create-directy-manageddisk-dr-without-snapshot --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-direct-disks
+Set-Location attivazione-dr-bolla-direct-disks
 git branch --show-current
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
@@ -403,19 +404,21 @@ La GET legge i log, non avvia la bolla. Per ogni VM seleziona l'esecuzione con i
 
 ## Collaudo della feature
 
-Collaudo completato il 12 ottobre 2026 nell'ambito approvato: tre subscription accessibili, una sola coppia primaria/DR reale. Non e stata simulata una seconda coppia facendo convergere primarie diverse nella stessa DR. Hosting, identita, operator, namespace delle risorse target e stato Terraform del test sono separati da delivery e dall'ambiente originale.
+Il collaudo del 12 ottobre 2026 descritto sotto riguarda il precedente percorso con snapshot, non la nuova copia diretta. L'ambito approvato comprendeva tre subscription accessibili, una sola coppia primaria/DR reale. Non e stata simulata una seconda coppia facendo convergere primarie diverse nella stessa DR. Hosting, identita, operator, namespace delle risorse target e stato Terraform del test erano separati da delivery e dall'ambiente originale.
 
 | Quale comportamento e stato verificato | Quale prova e disponibile |
 |---|---|
 | Due primarie instradate alle rispettive DR, identita distinte e VM omonime. | Test locali con Azure simulato: 11 controlli del resolver/log, inizializzazione reale di DRCore per due coppie, handler Get-DRStatus e preflight TwoPairs/SinglePair. Non costituiscono un test Azure su due coppie. |
 | Naming Terraform e indipendenza dei due suffissi. | 11 test con provider simulato, formato e validazione Terraform superati. |
-| Hosting e codice correnti separati. | Apply reale: 26 nuove risorse, zero modifiche/distruzioni. Hash dei sorgenti remoti uguali ai locali; entrambi gli endpoint privati verificati senza avviare replica. |
+| Hosting e codice della versione del 12 ottobre separati. | Apply reale: 26 nuove risorse, zero modifiche/distruzioni. Hash dei sorgenti remoti uguali ai locali; entrambi gli endpoint privati verificati senza avviare replica. |
 | Ricostruzione nuova nella coppia reale. | Target inizialmente privo di VM/NIC/dischi/snapshot; due VM, quattro dischi, quattro snapshot e due NIC creati. Due esiti SUCCEEDED correlati; 37 verifiche dirette su provisioning, guest agent, cifratura, origine dei dischi, IP, ASG e backend pool. |
 | Riuso nella stessa coppia. | Seconda invocazione con due esiti SUCCEEDED; 50 verifiche dirette, inclusi tutti gli ID, creation time e GUID delle NIC invariati. |
 | Primary reale senza DR corrispondente. | Resolver produttivo eseguito sull'inventario Azure reale: mapping assente rifiutato prima di qualunque scrittura. Non e una replica Function di un workload della terza primary. |
 | Preservazione di delivery e sorgenti. | 11 controlli: commit/hash/worktree delivery invariati; modelli delle due VM, quattro dischi sorgenti e delle Function originale/delivery uguali alla baseline. |
 
-Restano da verificare in Azure **due coppie distinte nello stesso CSV** quando saranno disponibili quattro subscription. Il collaudo non certifica salute applicativa, consistenza multi-disco, replica geografica o recupero dopo guasti. Il lab mantiene risorse a pagamento finche non viene autorizzato lo smantellamento; stato, valori reali, log, CSV e package restano locali e ignorati da Git.
+La nuova copia diretta supera 16 scenari locali sul codice degli stage B-C con risposte Azure simulate, inclusi riuso, cifratura DR e rifiuto dei dischi derivati da snapshot. Il test e [tests/direct-disk-copy.ps1](tests/direct-disk-copy.ps1); dalla root del repository eseguire `pwsh -NoLogo -NoProfile -File tests/direct-disk-copy.ps1`. Non e stato eseguito un nuovo deployment o trasferimento live.
+
+Restano da verificare in Azure il nuovo percorso diretto e **due coppie distinte nello stesso CSV** quando saranno disponibili quattro subscription. Il precedente collaudo non certifica salute applicativa, consistenza multi-disco, replica geografica o recupero dopo guasti. Il lab mantiene risorse a pagamento finche non viene autorizzato lo smantellamento; stato, valori reali, log, CSV e package restano locali e ignorati da Git.
 
 ## Limiti e troubleshooting
 
@@ -424,17 +427,17 @@ Restano da verificare in Azure **due coppie distinte nello stesso CSV** quando s
 | Mapping per nome della subscription e suffisso. | Le due identita devono poter enumerare le subscription necessarie; nomi DR duplicati, disabled o cross-tenant sono rifiutati. Una rinomina modifica il mapping e richiede verifica preventiva. |
 | Elaborazione dentro la richiesta HTTP, senza job persistente. | Il frontend puo perdere la risposta oltre circa 230 secondi. `functionTimeout=-1` non elimina riavvii, scale-in o aggiornamenti della piattaforma; non garantisce un'esecuzione infinita. |
 | Nessun lock tra richieste o istanze. | `vmParallelThrottle=1` e `http_concurrency=1` limitano il lavoro locale, non escludono attivazioni sovrapposte sullo stesso workload. |
-| Snapshot e dischi riusati non sono aggiornati dal primario. | Sorgente/DES uguali non provano freschezza o integrita dei dati; nessun controllo di eta, provisioning o readiness dello snapshot. Per il disco non vengono confrontati dimensione, tier o attuale utilizzo/collegamento. Una nuova POST puo continuare con dati precedenti. |
+| I dischi DR riusati non sono aggiornati dal primario. | Sorgente/DES e provisioning coerenti non provano freschezza o integrita del contenuto. Dimensione, tier e attuale utilizzo/collegamento non sono confrontati. Una nuova POST puo continuare con contenuti precedenti. |
 | Riuso VM limitato a size e disco OS. | Una VM spenta o con provisioning fallito puo superare questi controlli; NIC/dischi dati previsti, identita, tag e salute non vengono riconciliati. I dischi creati nello stage C possono restare non collegati alla VM riusata. |
 | Ricerca per nome senza verifica completa di appartenenza. | Il codice non richiede marcatori di proprieta del job o del workload per adottare risorse esistenti. Una NIC collegata ad altra VM o un disco in uso non sono respinti preventivamente dai controlli di riuso. |
-| Snapshot per disco senza coordinare le scritture. | Nessuna consistenza applicativa/multi-disco garantita, replica continua o RPO/RTO misurati. Nessuna pipeline cross-region implementata. |
+| Copia per disco senza coordinare le scritture. | Nessuna consistenza applicativa/multi-disco garantita, replica continua o RPO/RTO misurati. Le copie dirette sono limitate alla stessa regione e non fermano le VM sorgenti. |
 | Topologia e proprieta VM solo parzialmente ricostruite. | Una NIC e una IP configuration vengono ricreate; gli ASG trovati sulle configurazioni della NIC sorgente vengono raccolti sulla configurazione DR. NSG della NIC, altre NIC/IP, security profile, identita VM ed estensioni non sono ricopiati esplicitamente; zona VM e disk controller non sono impostati esplicitamente. |
 | NIC/pool non vengono riconciliati completamente. | Configurazione IP scelta per nome o prima disponibile; ASG discordanti non corretti e confronto saltato se nessun ASG DR e trovato. Aggiungere il pool desiderato conserva quelli precedenti; senza LB sorgente non li rimuove. Un esito positivo non certifica policy o traffico coerenti. |
-| Lookup di riuso con `ErrorAction=SilentlyContinue`. | Snapshot, dischi, NIC e VM possono non restituire un oggetto anche per problemi di lettura. Il ramo di creazione non distingue esplicitamente risorsa assente da lookup fallito; rischia tentativi impropri, conflitti e diagnosi ambigue. |
+| Lookup di riuso con `ErrorAction=SilentlyContinue`. | Dischi, NIC e VM possono non restituire un oggetto anche per problemi di lettura. Il ramo di creazione non distingue esplicitamente risorsa assente da lookup fallito; rischia tentativi impropri, conflitti e diagnosi ambigue. |
 | Stato ricavato dai nomi dei log, indicizzati per workload completo. | Gli omonimi sono distinti, ma vecchie esecuzioni con scritture tardive possono risultare le piu recenti. L'upload log fallito resta warning: risorse create ed esito mostrato possono divergere. |
 | Nessun preflight completo o rollback. | Righe incomplete vengono scartate, duplicati e risorse fuori ambito non sono respinti preventivamente. Errori possono lasciare risorse parziali; i retry ripetono anche alcuni errori di autorizzazione/configurazione. |
 | Function key condivisa e identita con ambiti subscription. | Il client non ha autorizzazione applicativa per identita/singolo workload; i permessi delle UAMI possono coprire risorse oltre la bolla. Ingresso privato non dimostra isolamento dell'uscita o delle VM DR. |
-| Nessuno smantellamento, retention dei log Blob o suite completa automatizzata degli stage DR. | Pulizia, costi e conservazione richiedono procedure esterne. I test locali coprono routing/contesti/stato; il lab separato prova fresh/reuse, non resistenza ai guasti o consistenza applicativa. |
+| Nessuno smantellamento, retention dei log Blob o suite completa automatizzata degli stage DR. | Pulizia, costi e conservazione richiedono procedure esterne. I test locali coprono routing/contesti/stato e copia diretta; il lab precedente prova solo il percorso con snapshot, non la nuova copia, la resistenza ai guasti o la consistenza applicativa. |
 
 **Condotta attuale:** usare CSV piccoli e autorizzati, chiamate sequenziali e prerequisiti verificati. Dopo un timeout non ripetere la POST prima di verificare l'esecuzione precedente. Confrontare gli ID dei log, controllare direttamente risorse/avvio e provare il servizio applicativo. Sono mitigazioni operative, non una soluzione ai limiti sopra.
 
@@ -454,18 +457,18 @@ Le seguenti sono proposte, non funzionalita presenti. **Prima dell'uso enterpris
 
 | Quando intervenire | Quale modifica proporre | Quale prova ne verifica l'efficacia |
 |---|---|---|
-| Implementato e collaudato nella feature entro il perimetro disponibile. | Routing per primaria + suffisso, rifiuto di mapping non univoci e chiave log subscription/gruppo/VM; nessuna DR globale. | Due coppie/omonimi verificati localmente; fresh/reuse verificati in una coppia Azure. Il test Azure di due coppie richiede quattro subscription e resta distinto. |
+| Routing implementato e collaudato entro il perimetro disponibile. | Routing per primaria + suffisso, rifiuto di mapping non univoci e chiave log subscription/gruppo/VM; nessuna DR globale. | Due coppie/omonimi verificati localmente; creazione/riuso con snapshot verificati in una coppia Azure. La nuova copia diretta ha test locali separati; il test Azure di due coppie richiede quattro subscription. |
 | Prima dell'uso enterprise. | Separare HTTP starter e job con Queue/worker o Durable Functions, workflow persistente; restituire ID/URL di stato e conservare stato, checkpoint e versione CSV. Verificare compatibilita, ruoli e costi. | Job oltre 230 secondi interrogabile per ID, anche dopo timeout/riavvio o scritture tardive. |
 | Prima dell'uso enterprise. | Chiave di idempotenza, lock distribuito per subscription/gruppo/VM e contesti Azure espliciti per tutte le operazioni. | POST sovrapposte non duplicano il workload e non cambiano contesto di operazioni altrui. |
 | Prima dell'uso enterprise. | Validare CSV, dimensione/numero/unicita righe e ambiti autorizzati; preflight di permessi, nomi/IP, prerequisiti, quota e operazioni previste. | Riga vietata, IP occupato o prerequisito mancante: errore esplicito e zero creazioni. |
-| Prima dell'uso enterprise. | Definire separatamente ripresa della stessa attivazione e ripristino con dati nuovi. Per ogni risorsa registrare ID, sorgente e generazione del restore; verificare stato e appartenenza prima del riuso. | La ripresa conserva la generazione prevista; un nuovo ripristino non usa silenziosamente vecchi snapshot. Risorse estranee, occupate o non pronte sono respinte. |
-| Prima dell'uso enterprise. | Verificare tutti i dischi/caching/LUN, NIC e collegamenti della VM riusata; dimensione/tier/collegamento dei dischi, stato snapshot/VM e avvio richiesto. Riparazioni solo esplicite e autorizzate, senza detach o cancellazioni automatiche. | VM spenta/fallita e modello discordante non producono successo; dischi creati e NIC prevista sono realmente associati alla VM corretta. |
+| Prima dell'uso enterprise. | Definire separatamente ripresa della stessa attivazione e ripristino con dati nuovi. Per ogni risorsa registrare ID, sorgente e generazione del restore; verificare stato e appartenenza prima del riuso. | La ripresa conserva la generazione prevista; un nuovo ripristino non riusa silenziosamente vecchi dischi DR. Risorse estranee, occupate o non pronte sono respinte. |
+| Prima dell'uso enterprise. | Verificare tutti i dischi/caching/LUN, NIC e collegamenti della VM riusata; dimensione/tier/collegamento dei dischi, stato VM e avvio richiesto. Riparazioni solo esplicite e autorizzate, senza detach o cancellazioni automatiche. | VM spenta/fallita e modello discordante non producono successo; dischi creati e NIC prevista sono realmente associati alla VM corretta. |
 | Prima dell'uso enterprise. | Bloccare ASG obbligatori mancanti/discordanti; selezionare esplicitamente IP configuration e pool, verificando anche collegamenti non previsti. Non rimuoverli senza ownership e approvazione. | ASG errati o pool aggiuntivi inattesi impediscono il successo; nessuna alterazione di traffico o risorse estranee. |
 | Prima dell'uso enterprise. | Distinguere lookup 404, assenza confermata, 403 ed errori transienti. Creare solo dopo assenza verificata e ricontrollare il modello dopo conflitti/concorrenza. | Lettura negata non avvia creazione; due attivazioni concorrenti non adottano risorse discordanti o duplicano le operazioni. |
 | In base a RPO/RTO. | Policy di freschezza e consistenza; quiescing, sospensione controllata delle scritture, o protezione application-aware. Copia cross-region e strategia zonale solo se richieste. | Restore drill con perdita dati, tempi e integrita misurati sulla topologia prevista. |
 | In base alla fedelta richiesta. | Formalizzare proprieta da preservare e differenze intenzionali: controller, security profile, zone, identita, NIC/IP ed estensioni. | Modelli sorgente/DR conformi a ogni proprieta richiesta e alle differenze approvate. |
 | In base alle policy di sicurezza. | Microsoft Entra per caller e autorizzazione per workload; least privilege, endpoint privati, uscita e accesso CSV/log controllati; approvazione delle operazioni distruttive. | Caller/destinazioni vietati respinti; test negativi dei limiti di rete e permessi. |
-| In base a gestione e costi. | Retry solo per errori transienti, checkpoint, cleanup su soli ID del job, retention snapshot/log e alert per attivazione. | Guasti rilevati e residui censiti; cleanup conserva sorgenti, prerequisiti e risorse estranee. |
+| In base a gestione e costi. | Retry solo per errori transienti, checkpoint, cleanup su soli ID del job, retention dei log e alert per attivazione. | Guasti rilevati e residui censiti; cleanup conserva sorgenti, prerequisiti e risorse estranee. |
 | A ogni modifica. | Test automatici con Azure mock e ambiente dedicato per mapping, stati, riuso, errori e concorrenza; pipeline con secret scanning e verifica dipendenze. | Regressioni/segreti bloccati; guasti e ripristino verificati, non solo esiti HTTP. |
 
 Punto di partenza piu semplice: completare il collaudo multi-DR e il preflight, rendere univoci job e stato, impedire sovrapposizioni. Una riscrittura o servizi aggiuntivi vanno introdotti solo per coprire requisiti confermati, con costo operativo esplicito. Le altre proposte non sono ancora implementate.
@@ -487,5 +490,6 @@ Punto di partenza piu semplice: completare il collaudo multi-DR e il preflight, 
 - [Ruoli compute e Disk Backup Reader](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/compute) e [Managed Identity Operator](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/identity).
 - [Networking Azure Functions](https://learn.microsoft.com/azure/azure-functions/functions-networking-options), [deployment Flex](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan) e [timeout](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
 - [Output binding PowerShell](https://learn.microsoft.com/azure/azure-functions/functions-reference-powershell#bindings) e [pattern HTTP di Durable Functions](https://learn.microsoft.com/azure/durable-task/durable-functions/durable-functions-http-features#expose-http-apis).
-- [Snapshot e consistenza dei dati](https://learn.microsoft.com/azure/virtual-machines/backup-and-disaster-recovery-for-azure-iaas-disks) e [copia snapshot tra regioni](https://learn.microsoft.com/azure/virtual-machines/disks-copy-incremental-snapshot-across-regions).
+- [Copia diretta di managed disk tra subscription](https://learn.microsoft.com/azure/virtual-machines/scripts/copy-managed-disks-to-same-or-different-subscription): supportata nella stessa regione e nello stesso tenant, anche con chiavi gestite dal cliente.
+- [Configurazione PowerShell dei dischi](https://learn.microsoft.com/powershell/module/az.compute/new-azdiskconfig): `Copy`, `SourceResourceId` e cifratura del DES DR; [tipi di cifratura](https://learn.microsoft.com/javascript/api/@azure/arm-compute/encryptiontype?view=azure-node-latest).
 - [Sicurezza degli endpoint Functions](https://learn.microsoft.com/azure/azure-functions/security-concepts#secure-operation): function key, autenticazione dei client e least privilege.
