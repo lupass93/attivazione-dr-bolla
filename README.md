@@ -298,11 +298,11 @@ Eseguire i comandi in **PowerShell 7.6**, dalla postazione autorizzata con perco
 
 ### 1. Selezionare e configurare
 
-Clonare il ramo feature in una directory separata oppure usare il worktree dedicato gia presente. Verificarne il branch prima del deployment; non sostituire il codice del branch delivery per eseguire questa procedura.
+Clonare il branch `delivery`, che include il routing multisubscription, oppure usare un checkout locale pulito di quel branch. Verificarne il nome prima del deployment. La copia diretta senza snapshot e separata nel branch `feature/create-directy-manageddisk-dr-without-snapshot`; selezionarlo solo per il collaudo autorizzato di quella feature.
 
 ```powershell
-git clone --branch feature/multisubscription-dr --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-multisubscription
-Set-Location attivazione-dr-bolla-multisubscription
+git clone --branch delivery --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla
+Set-Location attivazione-dr-bolla
 git branch --show-current
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
