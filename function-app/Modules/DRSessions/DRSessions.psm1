@@ -73,7 +73,7 @@ function Invoke-DRStorageRequest {
         Method = $Method; Uri = $Uri; Headers = $requestHeaders
         SkipHttpErrorCheck = $true; TimeoutSec = 60; ErrorAction = 'Stop'
     }
-    if ($null -ne $Body) {
+    if ($PSBoundParameters.ContainsKey('Body')) {
         $arguments.Body = [System.Text.Encoding]::UTF8.GetBytes($Body)
         $arguments.ContentType = $ContentType
     }

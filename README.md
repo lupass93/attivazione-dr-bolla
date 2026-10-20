@@ -10,7 +10,7 @@ Un **session identifier (`sessionId`)** e una stringa UUID, Universally Unique I
 
 Azure Blob Storage conserva file privati. Azure Queue Storage conserva messaggi che un esecutore legge successivamente. La sessione rimane nello storage fino alla cancellazione autorizzata: non e prevista una scadenza automatica.
 
-Le tre Application Programming Interface (API) e funzioni hanno queste responsabilita:
+Le due Application Programming Interface (API), interfacce HTTP chiamate dal client, e la funzione di elaborazione hanno queste responsabilita:
 
 | Quale componente esegue il lavoro | Quale responsabilita ha |
 |---|---|
@@ -254,6 +254,8 @@ Eseguire dalla radice:
 ```
 
 Il comando esegue le regressioni multisubscription e copia diretta, i nuovi test di accettazione/worker/stato/preflight e i test Terraform con provider simulato. Le chiamate Azure sono simulate nei test locali; i test reali richiedono un ambiente dedicato con accesso privato.
+
+I tre script live sono separati dai test locali per non avviare accidentalmente risorse: [validazione delle richieste](tests/live-request-validation.ps1), [preflight negativo](tests/live-preflight.ps1) e [attivazione e verifica Azure](tests/live-session.ps1). Leggono gli output Terraform locali, richiedono login e ruoli di verifica sulle risorse del lab e conservano prove in `out/live`, esclusa da Git. Gli ultimi due richiedono `-CsvBlobPath`, `-TargetSubscriptionId` e `-TargetResourceGroup`. Preparare soltanto risorse di test autorizzate; il test negativo richiede un ASG DR deliberatamente assente, mentre quello positivo richiede una destinazione workload inizialmente vuota e una NIC sorgente con ASG/backend pool. Non eseguirli su un ambiente cliente senza approvazione.
 
 | Quale requisito viene verificato | Quale prova ne dimostra il comportamento |
 |---|---|
