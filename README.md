@@ -310,6 +310,28 @@ Il nuovo [collaudo live delle quattro priorita](tests/live-csv-priority.ps1) usa
 | REQ-CSVLOG-003: allineare JSON e log senza perdere il contesto Azure. | Nomi/tipi dei blocchi cliente, contatori coerenti, VM omonime, acronimo nei risultati e nei log, stato persistente uguale alla proiezione pubblica. |
 | CON-ASYNC-001: vietare fallback dati pubblico. | Terraform configura Private Endpoint/identita; il codice rifiuta risoluzioni non private e connessioni non HTTPS. Il collaudo Azure deve verificarne il percorso effettivo. |
 
+### Quale collaudo del nuovo CSV e report e stato completato
+
+Il 20 ottobre 2026 la nuova feature e stata distribuita su una Function privata separata, senza ridistribuire l'app del ramo padre. Un CSV con quattro VM e ordine intenzionalmente inverso ha prodotto questo ordine reale di creazione:
+
+| Quale classe e stata attivata | In quale riga del CSV si trovava | Quando Azure ha creato la VM, in UTC |
+|---|---|---|
+| Sistemico. | Riga dati 4. | 17:38:34. |
+| Altamente critico. | Riga dati 3. | 17:39:07. |
+| Critico. | Riga dati 2. | 17:39:28. |
+| Non critico. | Riga dati 1. | 17:39:50. |
+
+I timestamp dei tentativi confermano anche che la VM successiva non e stata avviata prima della conclusione del tentativo precedente. Le quattro VM e i guest agent erano operativi; quattro dischi OS copiati direttamente, quattro NIC con IP statico/ASG/backend pool e zero snapshot sono stati verificati su Azure.
+
+- **Regressioni locali:** tutte superate, inclusi 28 controlli CSV/ordine, 33 controlli JSON/metadati e 14 scenari Terraform preesistenti.
+- **Richieste reali:** 12 controlli superati, compresi RTO sconosciuto, acronimo mancante e CSV precedente a tre colonne.
+- **Avanzamento reale:** 688 asserzioni superate su 22 osservazioni, log e risorse; i contatori persistenti e restituiti dall'API erano uguali e i quattro log di completamento contenevano sessione, criticita e acronimo.
+- **Confronto con il riferimento:** tutti i 35 controlli sui nomi/tipi dei campi cliente sono passati anche sul JSON prodotto in Azure.
+- **Misure di questa prova:** accettazione HTTP 202 in 3,01 secondi; worker 133,65 secondi; conclusione 142,80 secondi dopo la conferma della coda. Non sono garanzie RTO o di prestazione.
+- **Code finali:** attivazione e poison queue vuote. Ramo padre e configurazione della sua Function invariati; nessun file di riferimento reale del cliente e stato pubblicato.
+
+Il test esercita quattro classi nella stessa sessione e una coppia primaria/DR reale. Le parita di classe, i fallimenti e gli omonimi multisubscription sono verificati nei test locali; non si dichiara un test Azure su due coppie distinte o della salute applicativa.
+
 ### Quale collaudo storico del ramo padre era stato completato il 20 ottobre 2026
 
 Il test seguente riguarda il ramo padre `feature/async-session-id`, non certifica le nuove colonne o il report per criticita. Ha usato una Function separata dalla consegna precedente, nello stesso tenant del laboratorio, con una coppia primaria/DR reale. L'infrastruttura ha creato 29 risorse aggiuntive senza aggiornare o distruggere risorse gestite preesistenti nel piano Terraform. Le connessioni Function/Blob/Queue/Table sono private; l'accesso pubblico di Function e storage e disabilitato.
