@@ -26,11 +26,18 @@ try {
     Assert-LiveDR ($persisted.status -eq 'SUCCEEDED' -and $persisted.sessionId -eq $id) 'The terminal result must be persisted under the same session.'
     $resourceChecks = [System.Collections.Generic.List[object]]::new()
     foreach ($row in $completed.State.results) {
-        $text = az vm get-instance-view --subscription $TargetSubscriptionId --resource-group $TargetResourceGroup `
-            --name $row.vmName --query '{states:instanceView.statuses[].code,agent:instanceView.vmAgent.statuses[].displayStatus}' -o json --only-show-errors
-        if ($LASTEXITCODE -ne 0) { throw 'Direct VM status verification failed.' }
-        $vm = ($text -join "`n") | ConvertFrom-Json -AsHashtable
-        Assert-LiveDR ('PowerState/running' -in $vm.states -and 'ProvisioningState/succeeded' -in $vm.states -and 'Ready' -in $vm.agent) 'The target VM and guest agent must be operational.'
+        $deadline = [datetime]::UtcNow.AddMinutes(5)
+        do {
+            $text = az vm get-instance-view --subscription $TargetSubscriptionId --resource-group $TargetResourceGroup `
+                --name $row.vmName --query '{states:instanceView.statuses[].code,agent:instanceView.vmAgent.statuses[].displayStatus}' -o json --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw 'Direct VM status verification failed.' }
+            $vm = ($text -join "`n") | ConvertFrom-Json -AsHashtable
+            if ('ProvisioningState/failed' -in $vm.states) { throw 'The target VM entered failed provisioning.' }
+            $ready = 'PowerState/running' -in $vm.states -and 'ProvisioningState/succeeded' -in $vm.states -and 'Ready' -in $vm.agent
+            if ($ready) { break }
+            Start-Sleep -Seconds 5
+        } while ([datetime]::UtcNow -lt $deadline)
+        Assert-LiveDR $ready 'The target VM and guest agent must become operational within five minutes; resource creation does not imply immediate guest readiness.'
         $text = az vm show --subscription $TargetSubscriptionId --resource-group $TargetResourceGroup --name $row.vmName `
             --query '{os:storageProfile.osDisk.name,data:storageProfile.dataDisks[].name,nics:networkProfile.networkInterfaces[].id}' -o json --only-show-errors
         if ($LASTEXITCODE -ne 0) { throw 'Target VM attachment verification failed.' }
