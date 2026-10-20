@@ -32,8 +32,13 @@ $body = $response.Body | ConvertFrom-Json
 Assert-Test ([int]$response.StatusCode -eq 202 -and $body.sessionId -eq $id -and $body.queueConfirmed) 'The confirmed response must retain the client sessionId.'
 Assert-Test ($global:QueueMessages.Count -eq 1 -and $global:CoreCalls.Count -eq 0) 'The HTTP starter must enqueue without running replication.'
 Assert-Test ($response.Headers.Location -eq "/api/Get-DRStatus?sessionId=$id") 'The response must identify the session-specific status endpoint.'
+$global:CreateConflictCode = 409
 Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' } | Out-Null
 Assert-Test ($global:QueueMessages.Count -eq 1) 'Replaying an accepted request must not enqueue it again.'
+$global:CreateConflictError = 'LeaseAlreadyPresent'
+$response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
+Assert-Test ([int]$response.StatusCode -eq 503) 'Only BlobAlreadyExists may be treated as an existing session; unrelated storage conflicts must fail.'
+$global:CreateConflictError = 'BlobAlreadyExists'
 $stored = Read-DRDocument $global:TestClient "sessions/$id/request.json"
 Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-new"
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }

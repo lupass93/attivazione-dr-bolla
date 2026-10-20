@@ -20,6 +20,8 @@ function Reset-SessionTest {
     $global:QueueFailure = $false
     $global:WriteConflict = $false
     $global:NextVersion = 0
+    $global:CreateConflictCode = 412
+    $global:CreateConflictError = 'BlobAlreadyExists'
     $global:PreflightFailures = @()
     $global:ReplicationFailures = @()
     $global:CoreCalls = [System.Collections.Generic.List[object]]::new()
@@ -57,8 +59,11 @@ function Reset-SessionTest {
             else { $code = 404 }
         }
         elseif ($Method -eq 'PUT') {
-            if (($Headers.ContainsKey('If-None-Match') -and $global:BlobStore.ContainsKey($Uri)) -or
-                ($Headers.ContainsKey('If-Match') -and $Headers['If-Match'] -ne $global:BlobVersions[$Uri]) -or
+            if ($Headers.ContainsKey('If-None-Match') -and $global:BlobStore.ContainsKey($Uri)) {
+                $code = $global:CreateConflictCode
+                $responseHeaders['x-ms-error-code'] = $global:CreateConflictError
+            }
+            elseif (($Headers.ContainsKey('If-Match') -and $Headers['If-Match'] -ne $global:BlobVersions[$Uri]) -or
                 ($global:WriteConflict -and $Headers.ContainsKey('If-Match'))) {
                 $code = 412
                 $global:WriteConflict = $false

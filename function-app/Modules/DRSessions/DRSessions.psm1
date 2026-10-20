@@ -80,7 +80,7 @@ function Invoke-DRStorageRequest {
     try {
         $response = Invoke-WebRequest @arguments
         if ([int]$response.StatusCode -notin $AllowedStatus) {
-            throw "Storage $Method failed with HTTP $([int]$response.StatusCode). Request ID: $($response.Headers['x-ms-request-id'])."
+            throw "Storage $Method failed with HTTP $([int]$response.StatusCode), code '$($response.Headers['x-ms-error-code'])'. Request ID: $($response.Headers['x-ms-request-id'])."
         }
         return $response
     }
@@ -119,9 +119,15 @@ function Write-DRDocument {
     if ($CreateOnly) { $headers['If-None-Match'] = '*' }
     elseif ($ETag) { $headers['If-Match'] = $ETag }
     else { throw 'Session writes require create-only or ETag conditions.' }
+    $allowed = if ($CreateOnly) { @(201, 409, 412) } else { @(201, 412) }
     $response = Invoke-DRStorageRequest -Client $Client -Method PUT `
         -Uri (Get-DRBlobUri $Client $Client.Container $Path) -Headers $headers `
-        -Body ($Value | ConvertTo-Json -Depth 30 -Compress) -AllowedStatus @(201, 412)
+        -Body ($Value | ConvertTo-Json -Depth 30 -Compress) -AllowedStatus $allowed
+    if ([int]$response.StatusCode -eq 409) {
+        $errorCode = [string]@($response.Headers['x-ms-error-code'])[0]
+        if ($CreateOnly -and $errorCode -eq 'BlobAlreadyExists') { return $false }
+        throw "Conditional session creation failed with HTTP 409, code '$errorCode'."
+    }
     return [int]$response.StatusCode -eq 201
 }
 
