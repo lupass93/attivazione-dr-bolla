@@ -285,7 +285,7 @@ Gli scope subscription dell'operatore e della UAMI DR sono quelli operativi conc
 terraform/        Configurazione AzureRM, variabili, output e file di lock.
 terraform/tests/  Test di naming con provider simulato, senza operazioni Azure.
 function-app/     Host, due funzioni HTTP, DRCore e dipendenze fissate.
-scripts/          build.ps1 e deploy.ps1.
+scripts/          build.ps1, deploy.ps1 e deploy.sh per la pubblicazione da WSL.
 tests/            Test PowerShell di routing, contesti e stato con Azure simulato.
 examples/vms.csv  Esempio fittizio della configurazione VM.
 examples/vms-multisubscription.csv  Esempio fittizio con VM omonime in due primarie.
@@ -343,6 +343,14 @@ Prima di `apply`, esaminare il piano: nessuna creazione/sostituzione di RG, Stor
 ./scripts/build.ps1
 ./scripts/deploy.ps1
 ```
+
+Da Bash in WSL, dopo aver creato il package, si puo usare lo script equivalente con Terraform, Azure CLI, `jq` e `curl` installati in WSL, login Azure valido e accesso agli endpoint privati:
+
+```bash
+bash ./scripts/deploy.sh
+```
+
+Per percorsi diversi dai default: `bash ./scripts/deploy.sh ./terraform ./out/function-app.zip`. Il primo argomento e la directory Terraform, il secondo e il package ZIP; omettendoli si usano i percorsi del progetto indipendentemente dalla directory corrente. Lo script non crea infrastruttura e non avvia replica; la function key resta in memoria e viene passata a `curl` tramite stdin, senza stamparla o inserirla nell'URL.
 
 La build scarica i moduli nelle versioni di `function-app/requirements.psd1` e crea `out/function-app.zip`, senza impostazioni locali. Il deploy legge gli output Terraform, rimuove l'eventuale `AzureWebJobsStorage` legacy per usare l'identita, pubblica il codice e verifica i due endpoint: **400 senza CSV e l'esito atteso**, non una replica avviata. Se uno script fallisce, correggere l'errore prima di proseguire. Non usare storage key, `WEBSITE_RUN_FROM_PACKAGE` o accesso pubblico come workaround.
 
