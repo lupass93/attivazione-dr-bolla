@@ -11,7 +11,7 @@ try {
     Assert-LiveDR ($response.Code -eq 401) 'Missing function key must be rejected.'
     foreach ($body in @('{}', '{"sessionId":"invalid","csvBlobPath":"test.csv"}', '{invalid')) {
         $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST -Body $body
-        Assert-LiveDR ($response.Code -eq 400) 'Malformed or incomplete request must return 400.'
+        Assert-LiveDR ($response.Code -eq 400) "Malformed or incomplete request must return 400; received HTTP $($response.Code)."
     }
     $response = Invoke-LiveDRRequest "Get-DRStatus?sessionId=$id"
     Assert-LiveDR ($response.Code -eq 404) 'Invalid submissions must not register a session.'

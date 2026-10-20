@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $script:LiveRoot = Split-Path $PSScriptRoot -Parent
 $script:LiveChecks = 0
+$script:LivePlatformRetries = 0
 
 function Initialize-LiveDRTest {
     $text = terraform "-chdir=$(Join-Path $script:LiveRoot 'terraform')" output -json
@@ -32,7 +33,13 @@ function Invoke-LiveDRRequest {
     if (-not $Unauthenticated) { $parameters.Headers = $script:LiveHeaders }
     if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = 'application/json' }
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $response = Invoke-WebRequest @parameters
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $response = Invoke-WebRequest @parameters
+        if ([int]$response.StatusCode -ne 503 -or $response.Headers['Content-Type'] -match 'application/json' -or $attempt -eq 3) { break }
+        $script:LivePlatformRetries++
+        Write-Warning "The private frontend returned a non-application HTTP 503 for $Route; retrying the identical request ($attempt/3)."
+        Start-Sleep -Seconds (2 * $attempt)
+    }
     $watch.Stop()
     $json = $null
     if ($response.Headers['Content-Type'] -match 'application/json' -and $response.Content) {
@@ -111,6 +118,7 @@ function Save-LiveDREvidence {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $Evidence['verifiedAtUtc'] = [datetime]::UtcNow.ToString('o')
     $Evidence['checks'] = $script:LiveChecks
+    $Evidence['platform503Retries'] = $script:LivePlatformRetries
     $Evidence['result'] = 'PASS'
     $Evidence | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $directory "$Name.json") -Encoding utf8
     Write-Host "PASS: $Name, $script:LiveChecks checks."
