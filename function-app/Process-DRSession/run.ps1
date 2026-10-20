@@ -1,10 +1,14 @@
-param([string]$QueueItem, $TriggerMetadata)
+param($QueueItem, $TriggerMetadata)
 
 $ErrorActionPreference = 'Stop'
 $appRoot = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $appRoot 'Modules/DRSessions/DRSessions.psm1') -ErrorAction Stop
 Import-Module (Join-Path $appRoot 'Modules/DRCore/DRCore.psm1') -ErrorAction Stop
-$message = $QueueItem | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+$message = if ($QueueItem -is [string]) {
+    $QueueItem | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+}
+elseif ($QueueItem -is [System.Collections.IDictionary]) { $QueueItem }
+else { throw 'The DR queue payload must be a JSON object.' }
 $sessionId = ConvertTo-DRSessionId ([string]$message.sessionId)
 if ($message.schemaVersion -ne 1) { throw 'Unsupported DR queue message schema.' }
 $messageId = [string]$TriggerMetadata.Id

@@ -110,9 +110,11 @@ function Invoke-TestSubmission {
 }
 
 function Invoke-TestWorker {
-    param([string]$SessionId, [string]$MessageId = 'queue-message-one')
+    param([string]$SessionId, [string]$MessageId = 'queue-message-one', [switch]$NativePayload)
+    $payload = @{ schemaVersion = 1; sessionId = $SessionId }
+    if (-not $NativePayload) { $payload = $payload | ConvertTo-Json -Compress }
     & (Join-Path $script:Root 'function-app/Process-DRSession/run.ps1') `
-        -QueueItem (@{ schemaVersion = 1; sessionId = $SessionId } | ConvertTo-Json -Compress) `
+        -QueueItem $payload `
         -TriggerMetadata @{ Id = $MessageId; DequeueCount = 1 }
 }
 

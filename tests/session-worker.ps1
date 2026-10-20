@@ -12,6 +12,11 @@ Assert-Test (@($global:CoreCalls | Where-Object sessionId -ne $id).Count -eq 0) 
 Invoke-TestWorker $id 'duplicate-message'
 Assert-Test ($global:CoreCalls.Count -eq 4) 'A terminal session must not execute twice.'
 
+$nativeId = '99999999-9999-4999-8999-999999999999'
+Invoke-TestSubmission @{ sessionId = $nativeId; csvBlobPath = 'vms.csv' } | Out-Null
+Invoke-TestWorker $nativeId -NativePayload
+Assert-Test ((Get-DRSessionState $global:TestClient $nativeId).Value.status -eq 'SUCCEEDED') 'The real PowerShell binding may provide an already deserialized hashtable, not JSON text.'
+
 $id2 = '33333333-3333-4333-8333-333333333333'
 Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-one`nsource-b,rg-web,vm-two"
 Invoke-TestSubmission @{ sessionId = $id2; csvBlobPath = 'vms.csv' } | Out-Null
