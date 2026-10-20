@@ -237,7 +237,7 @@ function Register-DRSession {
     if (-not (Write-DRDocument $Client "sessions/$SessionId/request.json" $manifest -CreateOnly)) {
         $existing = Read-DRDocument $Client "sessions/$SessionId/request.json"
         if ($null -eq $existing) { throw 'The existing session manifest could not be read.' }
-        if ($existing.Value.csvBlobPath -ne $CsvBlobPath -or $existing.Value.csvSha256 -ne $Csv.csvSha256) {
+        if ($existing.Value.csvBlobPath -cne $CsvBlobPath -or $existing.Value.csvSha256 -ne $Csv.csvSha256) {
             Stop-DRRequest 409 'sessionId already belongs to a different CSV request. Use a new client-generated sessionId.'
         }
         $manifest = $existing.Value

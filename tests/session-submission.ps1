@@ -39,6 +39,9 @@ $global:CreateConflictError = 'LeaseAlreadyPresent'
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
 Assert-Test ([int]$response.StatusCode -eq 503) 'Only BlobAlreadyExists may be treated as an existing session; unrelated storage conflicts must fail.'
 $global:CreateConflictError = 'BlobAlreadyExists'
+Set-TestCsv $csv -Path 'VMS.csv'
+$response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'VMS.csv' }
+Assert-Test ([int]$response.StatusCode -eq 409) 'Blob paths are case-sensitive even when CSV contents are identical.'
 $stored = Read-DRDocument $global:TestClient "sessions/$id/request.json"
 Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-new"
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
