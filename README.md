@@ -266,7 +266,24 @@ I tre script live sono separati dai test locali per non avviare accidentalmente 
 | REQ-ASYNC-005: leggere lo stato della sessione richiesta. | Nessun recupero di successi precedenti, omonimi distinti e CSV modificato senza effetti retroattivi. |
 | CON-ASYNC-001: vietare fallback dati pubblico. | Terraform configura Private Endpoint/identita; il codice rifiuta risoluzioni non private e connessioni non HTTPS. Il collaudo Azure deve verificarne il percorso effettivo. |
 
-Il collaudo storico del 12 ottobre riguarda il vecchio percorso con snapshot e una sola coppia primaria/DR. Non certifica questa architettura. La convalida della nuova feature e riportata separatamente dopo l'esecuzione; un test simulato non e un test Azure su due coppie reali.
+### Quale collaudo reale e stato completato il 20 ottobre 2026
+
+Il test ha usato una Function separata dalla consegna precedente, nello stesso tenant del laboratorio, con una coppia primaria/DR reale. L'infrastruttura ha creato 29 risorse aggiuntive senza aggiornare o distruggere risorse gestite preesistenti nel piano Terraform. Le connessioni Function/Blob/Queue/Table sono private; l'accesso pubblico di Function e storage e disabilitato.
+
+| Quale flusso e stato verificato | Quale esito e stato osservato |
+|---|---|
+| Richieste senza credenziali, identificativo mancante/non valido, JSON non valido, CSV assente/incompleto/duplicato. | PASS: nove controlli reali; nessuna sessione accettata per input rifiutati. |
+| ASG DR deliberatamente mancante. | PASS: 19 controlli; sessione `FAILED` nella fase di preflight, indicazione dell'ASG e nessuna creazione workload. |
+| Nuova attivazione da destinazione workload vuota. | PASS: 15 controlli; una VM e guest agent operativi, due dischi copiati direttamente e cifrati con DES DR, una NIC con IP statico, ASG e backend pool; zero snapshot. |
+| Ripetizione della richiesta con lo stesso identificativo. | PASS durante l'attivazione e dopo la conclusione; stesso stato/sessione, senza creare un secondo workload. |
+| Durata della richiesta e del lavoro. | HTTP 202 in 4,45 secondi; worker attivo per 52,33 secondi; conclusione 61,23 secondi dopo la conferma della coda. Sono misure di questa prova, non limiti o garanzie di servizio. |
+| Code al termine della verifica. | Nessun messaggio rimasto nella coda di attivazione o nella poison queue dopo archiviazione e rimozione del solo messaggio del test negativo. |
+
+Il collaudo ha individuato e corretto due differenze rispetto ai mock: il binding PowerShell puo consegnare una hashtable gia deserializzata e la creazione condizionale Blob puo restituire `409 BlobAlreadyExists`. Entrambi i casi sono coperti da regressioni; conflitti diversi non vengono interpretati come successo.
+
+Durante le prime prove negative il frontend privato ha restituito anche HTTP 503 non applicativi. I test registrano i retry limitati della richiesta identica e non mascherano errori JSON della Function. La prova positiva finale non ha richiesto tali retry. Non e stata certificata una disponibilita o una latenza garantita.
+
+Il collaudo storico del 12 ottobre riguardava il vecchio percorso con snapshot: non e usato come prova di questa architettura. Due coppie reali nello stesso CSV restano non verificate, perche il tenant disponibile non contiene quattro subscription utilizzabili; routing e VM omonime su due coppie sono verificati nei test simulati. Salute applicativa, consistenza multi-disco e resistenza a tutti i guasti non sono certificate.
 
 ## Quali limiti restano intenzionalmente fuori da questa modifica
 
