@@ -4,7 +4,7 @@ Azure Functions privata, PowerShell 7.6 e piano Flex Consumption: legge da Azure
 
 > Questa soluzione deriva dalla copia corretta di [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla). Il README descrive il codice attuale; le migliorie indicate come proposte non sono implementate.
 
-**Branch dedicato:** questo README riguarda `feature/create-directy-manageddisk-dr-without-snapshot`, creato da `delivery` dopo il merge di `feature/multisubscription-dr`. Questo branch conserva il routing multisubscription e crea i managed disk DR direttamente dai managed disk primari, senza snapshot intermedi. Il branch `delivery` mantiene invece il percorso con snapshot.
+**Branch di consegna:** `delivery` include il routing multisubscription e crea i managed disk DR direttamente dai managed disk primari, senza snapshot intermedi. Le due funzionalita precedentemente sviluppate su branch separati sono integrate; il collaudo Azure della nuova copia diretta resta distinto dai test storici con snapshot.
 
 ## Indice
 
@@ -299,11 +299,11 @@ Eseguire i comandi in **PowerShell 7.6**, dalla postazione autorizzata con perco
 
 ### 1. Selezionare e configurare
 
-Clonare il branch `feature/create-directy-manageddisk-dr-without-snapshot` in una directory separata oppure usare un checkout locale pulito di quel branch. Verificarne il nome prima del deployment: include il routing multisubscription di `delivery` e la copia diretta senza snapshot. Il deployment e il collaudo Azure richiedono autorizzazione separata.
+Clonare il branch `delivery` in una directory separata oppure usare un checkout locale pulito di quel branch. Il deployment e il collaudo Azure richiedono autorizzazione separata.
 
 ```powershell
-git clone --branch feature/create-directy-manageddisk-dr-without-snapshot --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-direct-disks
-Set-Location attivazione-dr-bolla-direct-disks
+git clone --branch delivery --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla
+Set-Location attivazione-dr-bolla
 git branch --show-current
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
