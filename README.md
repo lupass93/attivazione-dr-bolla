@@ -4,6 +4,8 @@ La soluzione ricrea Virtual Machine (VM), server virtuali Azure, in un ambiente 
 
 **Questo README descrive `feature/async-session-id-csv-log`, derivato da `feature/async-session-id`.** Git non permette il nome `feature/async-session-id/csv-log` mentre esiste il ramo padre: il nome alternativo mantiene intatto il padre. Questa versione aggiunge criticita, acronimo e report compatibile con il tracciato cliente. Restano routing multisubscription e copia diretta dei managed disk, dischi gestiti da Azure, senza snapshot intermedi. Uno snapshot e una copia puntuale conservata come risorsa separata; questo flusso non ne crea, legge o riusa.
 
+**Per condurre la prova con il cliente:** seguire la [guida operativa passo per passo](docs/guida-test-cliente.md). Include uso di tutte e tre le funzioni, comandi, risultati attesi, gestione degli errori e resoconto aggiornato, senza richiedere un nuovo deployment se l'app e gia pronta.
+
 ## Quale architettura viene distribuita
 
 Un **session identifier (`sessionId`)** e una stringa UUID, Universally Unique Identifier, che il client genera prima della richiesta. Identifica una singola attivazione e tutte le VM del suo elenco. Il server non lo genera e non usa l'identificatore dell'esecuzione del runtime al suo posto. Richiede il formato `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, diverso dall'UUID vuoto, e lo normalizza in minuscolo.
