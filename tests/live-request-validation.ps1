@@ -5,6 +5,7 @@ param()
 Initialize-LiveDRTest
 $id = [guid]::NewGuid().ToString('D')
 $path = "dr-tests/$id-invalid.csv"
+$csvCreated = $false
 try {
     $response = Invoke-LiveDRRequest "Get-DRStatus?sessionId=$id" -Unauthenticated
     Assert-LiveDR ($response.Code -eq 401) 'Missing function key must be rejected.'
@@ -18,6 +19,7 @@ try {
         -Body (@{ sessionId = $id; csvBlobPath = "dr-tests/$id-missing.csv" } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 404) 'A nonexistent CSV must return 404.'
     Write-LiveDRCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource,,vm" $path
+    $csvCreated = $true
     $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
         -Body (@{ sessionId = $id; csvBlobPath = $path } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 400) 'A missing column value must reject the complete request.'
@@ -29,7 +31,11 @@ try {
     Assert-LiveDR ($response.Code -eq 404) 'Rejected CSVs must not leave an accepted session.'
     Save-LiveDREvidence 'request-validation' @{ rejectedSessionId = $id; persistedSession = $false }
 }
+catch {
+    Write-Host "Live request validation failed: $($_.Exception)"
+    throw
+}
 finally {
-    Remove-LiveDRCsv $path
+    if ($csvCreated) { Remove-LiveDRCsv $path }
     $script:LiveHeaders.Clear()
 }
