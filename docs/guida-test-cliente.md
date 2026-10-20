@@ -38,7 +38,7 @@ Un Private Endpoint collega un servizio a un indirizzo privato della rete Azure.
 
 | Quale soggetto deve essere pronto | Quali condizioni verificare |
 |---|---|
-| Postazione del cliente. | PowerShell 7.6, Git e Azure CLI disponibili; accesso privato a Function e Blob. Terraform e necessario solo per deployment o lettura dei suoi output. Non assumere che una Cloud Shell pubblica raggiunga i servizi privati. |
+| Postazione del cliente. | PowerShell 7.6, Git e Azure CLI per i passi API di questa guida; accesso privato a Function e Blob. Il deploy puo usare PowerShell o Bash con target esplicito, senza Terraform; quest'ultimo serve solo scegliendo la modalita basata sui suoi output. Non assumere che una Cloud Shell pubblica raggiunga i servizi privati. |
 | Operatore delle API. | Function key fornita dal responsabile oppure permesso per leggerla; upload sul container CSV e lettura di log/sessioni. La function key e un segreto condiviso valido fino alla rotazione, non il `sessionId`. |
 | Operatore che verifica le risorse. | Lettura dei gruppi/subscription sorgenti e DR. I ruoli delle identita della Function non vengono automaticamente attribuiti alla persona. |
 | UAMI sorgente/storage. | Una User-Assigned Managed Identity (UAMI) e un'identita Azure gestita senza password. Questa identita legge il primario e ha Storage Blob Data Owner, Storage Queue Data Contributor e Storage Table Data Contributor sullo storage; invia telemetria con Monitoring Metrics Publisher. |
@@ -481,48 +481,59 @@ La Function non espone un'API di smantellamento. Concordare con il responsabile 
 
 Questa e una fase separata e autorizzata, non parte dei test API:
 
-**Il file allegato di 37 righe coincide con lo script versionato [scripts/deploy.ps1](../scripts/deploy.ps1). Il nome non cambia.** Va pero eseguito dalla versione CSV/log e su un pacchetto appena generato. Il deploy non scarica il ramo, non esegue la build e non crea infrastruttura.
+**Usare gli script del repository aggiornato, non l'allegato storico di 37 righe.** [scripts/deploy.ps1](../scripts/deploy.ps1) e [scripts/deploy.sh](../scripts/deploy.sh) ora accettano il target esplicito senza Terraform. La build prepara il ZIP locale; il deploy non scarica il ramo, non esegue la build e non crea infrastruttura.
 
 | Quale situazione presenta il cliente | Quale percorso seguire |
 |---|---|
-| Hosting asincrono gia pronto, con Queue, sessioni, tre funzioni e ruoli. | Usare il checkout aggiornato CSV/log, verificare gli output dell'ambiente e lanciare build/deploy. Non serve modificare Terraform per le sole colonne e il report. |
+| Hosting asincrono gia pronto, con Queue, sessioni, tre funzioni e ruoli. | Usare il checkout aggiornato CSV/log, confermare subscription hosting/gruppo/nome Function e lanciare build/deploy con questi tre parametri. Terraform non e necessario. |
 | Vecchia versione senza infrastruttura asincrona. | Prima piano/apply Terraform autorizzato e ruoli, incluso Storage Queue Data Contributor alla UAMI sorgente/storage. Poi build/deploy. |
 | Nessun hosting. | Eseguire la prima installazione del README, dopo aver predisposto risorse esterne e connettivita privata. |
-| Clone nuovo, hosting esistente ma nessuno stato locale. | Collegare il backend/stato Terraform corretto prima di usare il deploy. Il clone non contiene lo stato; non creare una seconda infrastruttura per ottenere gli output. |
+| Clone nuovo, hosting esistente ma nessuno stato locale. | Usare il target esplicito. Soltanto scegliendo la modalita Terraform serve collegare il backend/stato corretto; non creare una seconda infrastruttura per ottenere gli output. |
 
-Per il primo caso, dalla radice del checkout e dopo aver confermato nome Function, gruppo e subscription negli output:
+### Come pubblicare da PowerShell senza Terraform
+
+Per il primo caso, dalla radice del checkout aggiornato e dopo aver sostituito i tre segnaposto con i riferimenti del cliente:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 if ((git branch --show-current) -ne 'feature/async-session-id-csv-log') { throw 'Checkout non corrispondente alla versione richiesta.' }
 git pull --ff-only origin feature/async-session-id-csv-log
 if ($LASTEXITCODE -ne 0) { throw 'Aggiornamento Git non riuscito; verificare autorizzazione al repository privato.' }
-$Deployment = terraform -chdir=terraform output -json | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Stato/output Terraform dell ambiente non disponibili.' }
-$Deployment.function_app_name.value
-$Deployment.resource_group_name.value
-$Deployment.hosting_subscription_id.value
-./scripts/build.ps1
-./scripts/deploy.ps1
+./scripts/build.ps1 -PackagePath './out/function-app.zip'
+./scripts/deploy.ps1 `
+    -SubscriptionId '<ID-SUBSCRIPTION-HOSTING>' `
+    -ResourceGroupName '<RESOURCE-GROUP-HOSTING>' `
+    -FunctionAppName '<NOME-FUNCTION-APP>' `
+    -PackagePath './out/function-app.zip'
 ```
 
-Se gli output sono in un'altra directory, usare `-TerraformDirectory` e `-PackagePath` espliciti come indicato nel [README](../README.md#quale-script-lanciare-per-la-nuova-versione). La copia isolata dell'allegato non individua automaticamente la directory del progetto.
+La build usa `-PackagePath` come destinazione del ZIP; il deploy usa lo stesso percorso come sorgente del pacchetto. La subscription e quella dell'hosting, il Resource Group contiene la Function App e il nome identifica l'app intera, non una delle sue tre funzioni. Il deploy ricava da Azure l'hostname effettivo: non occorre passare l'URL.
 
-### Come pubblicare la stessa versione senza installare PowerShell
+### Come pubblicare da Bash senza Terraform o PowerShell
 
-La procedura Bash e indipendente da PowerShell. Installare le utility native e verificare branch, autenticazione, rete e destinazione come descritto nel [README, inclusi tutti i parametri e i default](../README.md#come-eseguire-build-e-deployment-da-bash-senza-powershell). Per un hosting asincrono gia pronto e con lo stato Terraform corretto:
+Installare le utility native e verificare branch, autenticazione, rete e destinazione come descritto nel [README](../README.md#come-eseguire-build-e-deployment-da-bash-senza-powershell). Sullo stesso hosting gia pronto:
 
 ```bash
 set -euo pipefail
-bash ./scripts/build.sh
-bash ./scripts/deploy.sh
+bash ./scripts/build.sh --package-path "./out/function-app.zip"
+bash ./scripts/deploy.sh \
+    --subscription-id "<ID-SUBSCRIPTION-HOSTING>" \
+    --resource-group-name "<RESOURCE-GROUP-HOSTING>" \
+    --function-app-name "<NOME-FUNCTION-APP>" \
+    --package-path "./out/function-app.zip"
 ```
 
-Se lo stato e altrove, passare `--terraform-directory "/percorso/terraform cliente"` al deploy. Il parametro `--package-path "./out/function-app.zip"` seleziona il pacchetto da pubblicare. Per una build senza nuovi download usare `--skip-module-download` soltanto dopo aver predisposto `out/module-cache`. I due `--help` mostrano la sintassi senza operazioni Azure.
+La [tabella unica dei parametri PowerShell/Bash](../README.md#come-pubblicare-senza-terraform-con-i-parametri-del-target) documenta funzione, obbligatorieta e default. Per una build senza nuovi download usare `--skip-module-download` soltanto dopo aver predisposto `out/module-cache`; PowerShell usa invece `-SkipModuleDownload` con i suoi moduli locali. I due `--help` Bash mostrano la sintassi senza operazioni Azure.
 
 La build Bash non esegue script PowerShell, non usa i moduli scaricati dalla build PowerShell e non richiede `pwsh` installato. Il deploy non avvia attivazioni: controlla la presenza delle tre funzioni e invia soltanto richieste incomplete che devono essere rifiutate con HTTP 400.
 
-**Collaudo completato:** 40 test locali e build reale in Ubuntu senza PowerShell installato; build e deploy effettivi dal lab privato con PowerShell escluso dal `PATH`. Tre funzioni, 400 previsti, report esistente schema 2 e quattro classi verificati. Code vuote prima/dopo, nessuna replica nuova, app del ramo padre invariata e postazione riportata deallocata. I [dettagli e limiti della verifica](../README.md#quale-verifica-reale-ha-superato-la-procedura-bash-indipendente) non sostituiscono i prerequisiti del tenant cliente.
+**Collaudo storico del 20 ottobre:** 40 test locali e build reale in Ubuntu senza PowerShell installato; build e deploy effettivi dal lab privato con PowerShell escluso dal `PATH`. Tre funzioni, 400 previsti, report esistente schema 2 e quattro classi verificati. Code vuote prima/dopo, nessuna replica nuova, app del ramo padre invariata e postazione riportata deallocata.
+
+**Collaudo della nuova modalita senza Terraform:** il 21 ottobre, fra le 00:30:55 e le 00:34:22 ora italiana, PowerShell e Bash hanno generato e pubblicato realmente due ZIP distinti con i parametri espliciti, senza Terraform nel `PATH`. Entrambi i deployment Azure sono riusciti; dopo ciascuno sono stati verificati tre funzioni, i due 400 attesi e lo storico schema 2 con le quattro classi. Le code erano vuote prima, fra le due pubblicazioni e dopo; nessuna nuova replica e stata avviata. Postazione nuovamente deallocata. Sono passati anche 37 test PowerShell e 68 Bash, con compatibilita della modalita precedente. I [dettagli e limiti del collaudo reale](../README.md#quale-collaudo-reale-ha-superato-la-modalita-senza-terraform) non sostituiscono i prerequisiti del cliente.
+
+### Come mantenere la modalita Terraform precedente
+
+Il deploy senza i tre parametri del target continua a leggere gli output Terraform. Se lo stato e altrove usare `-TerraformDirectory` in PowerShell oppure `--terraform-directory` in Bash. Questi parametri non vanno mescolati con il target esplicito; input parziali non attivano un recupero automatico da Terraform. Non servono installazione, stato o output Terraform per i comandi espliciti sopra.
 
 ### Quando predisporre anche l'infrastruttura
 
@@ -537,7 +548,7 @@ Il pacchetto contiene versioni fissate dei moduli Azure, senza `local.settings.j
 
 I comandi Terraform richiedono lo stato e gli input dell'ambiente corretto; non copiarli dal lab interno. Il deployment non prepara reti o applicazioni del sito DR al posto del loro gestore.
 
-**Verifica effettuata sullo script allegato:** il 20 ottobre sono stati eseguiti i due comandi PowerShell sopra, con lo stesso `deploy.ps1` di 37 righe, su hosting CSV/log privato gia configurato. PowerShell 7.6.1 Linux e Azure CLI 2.91.0: deployment riuscito, tre funzioni verificate, 400 previsti, schema 2 riletto, code vuote e nessuna replica avviata. Non e una certificazione del tenant cliente o di Windows; prima della prova restano da confermare rete, ruoli e stato Terraform del suo ambiente.
+**Verifica storica dello script allegato:** il 20 ottobre sono stati eseguiti build e deploy PowerShell precedenti, con lo stesso `deploy.ps1` di 37 righe, su hosting CSV/log privato gia configurato. PowerShell 7.6.1 Linux e Azure CLI 2.91.0: deployment riuscito, tre funzioni verificate, 400 previsti, schema 2 riletto, code vuote e nessuna replica avviata. Quella prova riguarda la versione precedente; la modalita parametrizzata usa gli script correnti. Rete, ruoli e destinazione del cliente restano da confermare; lo stato Terraform serve solo nella modalita precedente.
 
 ## Resoconto aggiornato: quali informazioni del testo precedente restano valide
 
@@ -590,6 +601,7 @@ La procedura principale usa un'app gia distribuita e un ambiente approvato; non 
 - Passi 6-16: [Invoke-RestMethod](https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/invoke-restmethod?view=powershell-7.6), [pattern di richiesta/risposta asincrona](https://learn.microsoft.com/azure/architecture/patterns/asynchronous-request-reply), [Queue trigger e riconsegne](https://learn.microsoft.com/azure/azure-functions/functions-bindings-storage-queue-trigger).
 - Passi 14 e 17: [copia diretta dei dischi](https://learn.microsoft.com/azure/virtual-machines/scripts/copy-managed-disks-to-same-or-different-subscription), [durata esecuzioni e limite HTTP](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
 - Deployment: [scripts/deploy.ps1](../scripts/deploy.ps1), [build Bash nativa](../scripts/build.sh), [deploy Bash nativo](../scripts/deploy.sh), [pubblicazione Azure Functions](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan), [download manuale dei moduli](https://learn.microsoft.com/powershell/gallery/how-to/working-with-packages/manual-download?view=powershellget-3.x).
+- Target esplicito e parametri: [lettura dei riferimenti della Function App](https://learn.microsoft.com/cli/azure/functionapp#az-functionapp-show), [parameter set PowerShell](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_parameter_sets?view=powershell-7.6), [tabella dei parametri nel README](../README.md#come-pubblicare-senza-terraform-con-i-parametri-del-target).
 
 ## Glossario per la conduzione del test
 

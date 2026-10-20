@@ -1,17 +1,65 @@
-[CmdletBinding()]
+<#
+.SYNOPSIS
+Deploy an existing ZIP to an explicit Azure target or to the target recorded in Terraform outputs.
+.PARAMETER SubscriptionId
+Hosting subscription. Specify together with ResourceGroupName and FunctionAppName to avoid Terraform entirely.
+.PARAMETER ResourceGroupName
+Resource Group containing the existing Function App.
+.PARAMETER FunctionAppName
+Existing Function App to update. Its API hostname is read from Azure.
+.PARAMETER TerraformDirectory
+Alternative to the three explicit target parameters. Default: terraform in this repository.
+.PARAMETER PackagePath
+Existing deployment ZIP. Default: out/function-app.zip in this repository. Custom relative paths use the caller's directory.
+#>
+[CmdletBinding(DefaultParameterSetName = 'Terraform')]
 param(
+    [Parameter(ParameterSetName = 'Terraform', Position = 0)]
+    [ValidateNotNullOrWhiteSpace()]
     [string]$TerraformDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'terraform'),
-    [string]$PackagePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out/function-app.zip')
+    [Parameter(Position = 1)]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$PackagePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out/function-app.zip'),
+    [Parameter(Mandatory, ParameterSetName = 'Explicit')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$SubscriptionId,
+    [Parameter(Mandatory, ParameterSetName = 'Explicit')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$ResourceGroupName,
+    [Parameter(Mandatory, ParameterSetName = 'Explicit')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$FunctionAppName
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not (Test-Path $PackagePath)) { throw 'Run scripts/build.ps1 before deploying.' }
-$outputs = terraform "-chdir=$TerraformDirectory" output -json | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Terraform outputs unavailable. Apply the infrastructure first.' }
-$subscription = $outputs.hosting_subscription_id.value
-$resourceGroup = $outputs.resource_group_name.value
-$name = $outputs.function_app_name.value
-$api = $outputs.api_url.value
+if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw 'Run scripts/build.ps1 before deploying, or provide an existing ZIP.' }
+if ($PSCmdlet.ParameterSetName -eq 'Explicit') {
+    $subscription = $SubscriptionId
+    $resourceGroup = $ResourceGroupName
+    $name = $FunctionAppName
+    $hostname = az functionapp show --subscription $subscription --resource-group $resourceGroup --name $name `
+        --query 'defaultHostName || properties.defaultHostName' --output tsv --only-show-errors
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to read the target Function App. Check its name, subscription and access.' }
+    if ($hostname -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z0-9-]+$') { throw 'The target Function App has no valid default hostname.' }
+    $api = "https://$hostname/api"
+} else {
+    $outputText = terraform "-chdir=$TerraformDirectory" output -json
+    if ($LASTEXITCODE -ne 0) { throw 'Terraform outputs unavailable. Select an existing state, or use the three explicit target parameters.' }
+    $outputs = ($outputText -join "`n") | ConvertFrom-Json
+    $subscription = $outputs.hosting_subscription_id.value
+    $resourceGroup = $outputs.resource_group_name.value
+    $name = $outputs.function_app_name.value
+    $api = $outputs.api_url.value
+    foreach ($required in @{
+            hosting_subscription_id = $subscription; resource_group_name = $resourceGroup
+            function_app_name = $name; api_url = $api
+        }.GetEnumerator()) {
+        if ($required.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($required.Value)) {
+            throw "Missing Terraform output: $($required.Key)."
+        }
+    }
+}
+Write-Host "Deploying $PackagePath to subscription $subscription, Resource Group $resourceGroup, Function App $name."
 
 az functionapp config appsettings delete --subscription $subscription --resource-group $resourceGroup --name $name --setting-names AzureWebJobsStorage --output none --only-show-errors
 if ($LASTEXITCODE -ne 0) { throw 'Unable to select identity-based host storage. Deployment stopped.' }

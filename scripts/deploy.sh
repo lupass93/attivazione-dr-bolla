@@ -8,22 +8,27 @@ fail() {
 
 usage() {
     cat <<'USAGE'
-Usage: bash scripts/deploy.sh [--terraform-directory DIRECTORY] [--package-path ZIP]
+Usage: bash scripts/deploy.sh --subscription-id ID --resource-group-name GROUP --function-app-name NAME [--package-path ZIP]
+   or: bash scripts/deploy.sh [--terraform-directory DIRECTORY] [--package-path ZIP]
    or: bash scripts/deploy.sh [terraform-directory] [package-path]
 
-Deploy an existing package using the selected Terraform outputs.
+Deploy an existing package. All three target parameters select Terraform-free mode.
 
 Options:
+  --subscription-id ID             Hosting subscription, used with both target names.
+  --resource-group-name GROUP       Resource Group of the existing Function App.
+  --function-app-name NAME          Existing Function App. API hostname is read from Azure.
   --terraform-directory DIRECTORY  Terraform root/state used to select the target.
-                                  Default: <repository>/terraform
+                                  Alternative to explicit targets; default: <repository>/terraform
   --package-path ZIP               Existing deployment ZIP.
                                   Default: <repository>/out/function-app.zip
   -h, --help                       Show help without deploying.
 
 Named and positional arguments cannot be mixed. Custom relative paths are
 relative to the caller's directory; default paths are relative to this script.
+Explicit targets cannot be mixed with a Terraform directory.
 This command does not build, provision infrastructure or start DR replication.
-Requires terraform, az, jq, curl and private connectivity.
+Requires az, jq, curl and private connectivity; terraform only in Terraform mode.
 USAGE
 }
 
@@ -35,6 +40,9 @@ usage_error() {
 
 terraform_directory=
 package_path=
+subscription=
+resource_group=
+name=
 named=false
 positional=()
 while (( $# )); do
@@ -57,6 +65,24 @@ while (( $# )); do
             named=true
             shift 2
             ;;
+        --subscription-id|--resource-group-name|--function-app-name)
+            if (( $# < 2 )) || [[ -z "${2//[[:space:]]/}" || "$2" == -* ]]; then
+                usage_error "$1 requires a value."
+            fi
+            case "$1" in
+                --subscription-id)
+                    [[ -z "$subscription" ]] || usage_error "$1 was specified more than once."
+                    subscription=$2 ;;
+                --resource-group-name)
+                    [[ -z "$resource_group" ]] || usage_error "$1 was specified more than once."
+                    resource_group=$2 ;;
+                --function-app-name)
+                    [[ -z "$name" ]] || usage_error "$1 was specified more than once."
+                    name=$2 ;;
+            esac
+            named=true
+            shift 2
+            ;;
         -h|--help) usage; exit 0 ;;
         --)
             shift
@@ -74,20 +100,35 @@ fi
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if (( ${#positional[@]} >= 1 )); then terraform_directory=${positional[0]}; fi
 if (( ${#positional[@]} == 2 )); then package_path=${positional[1]}; fi
-terraform_directory=${terraform_directory:-"$root/terraform"}
 package_path=${package_path:-"$root/out/function-app.zip"}
+if [[ -n "$subscription$resource_group$name" ]]; then
+    [[ -n "$subscription" && -n "$resource_group" && -n "$name" ]] ||
+        usage_error 'Specify --subscription-id, --resource-group-name and --function-app-name together.'
+    [[ -z "$terraform_directory" ]] || usage_error 'Do not mix explicit targets with --terraform-directory.'
+fi
 
-for executable in terraform az jq curl; do
+for executable in az jq curl; do
     command -v "$executable" >/dev/null 2>&1 || fail "Required command not found: $executable"
 done
 [[ -f "$package_path" ]] || fail 'Run scripts/build.sh (or scripts/build.ps1) before deploying, or provide an existing ZIP.'
 
-outputs=$(terraform "-chdir=$terraform_directory" output -json) || fail 'Terraform outputs unavailable. Apply the infrastructure first.'
-subscription=$(jq -er '.hosting_subscription_id.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing hosting_subscription_id output.'
-resource_group=$(jq -er '.resource_group_name.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing resource_group_name output.'
-name=$(jq -er '.function_app_name.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing function_app_name output.'
-api=$(jq -er '.api_url.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing api_url output.'
-target=(--subscription "$subscription" --resource-group "$resource_group" --name "$name")
+if [[ -n "$subscription" ]]; then
+    target=(--subscription "$subscription" --resource-group "$resource_group" --name "$name")
+    hostname=$(az functionapp show "${target[@]}" --query 'defaultHostName || properties.defaultHostName' --output tsv --only-show-errors) ||
+        fail 'Unable to read the target Function App. Check its name, subscription and access.'
+    [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z0-9-]+$ ]] || fail 'The target Function App has no valid default hostname.'
+    api="https://$hostname/api"
+else
+    command -v terraform >/dev/null 2>&1 || fail 'Required command not found: terraform. Alternatively, provide all three explicit target parameters.'
+    terraform_directory=${terraform_directory:-"$root/terraform"}
+    outputs=$(terraform "-chdir=$terraform_directory" output -json) || fail 'Terraform outputs unavailable. Select an existing state, or use the three explicit target parameters.'
+    subscription=$(jq -er '.hosting_subscription_id.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing hosting_subscription_id output.'
+    resource_group=$(jq -er '.resource_group_name.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing resource_group_name output.'
+    name=$(jq -er '.function_app_name.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing function_app_name output.'
+    api=$(jq -er '.api_url.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing api_url output.'
+    target=(--subscription "$subscription" --resource-group "$resource_group" --name "$name")
+fi
+printf 'Deploying %s to subscription %s, Resource Group %s, Function App %s.\n' "$package_path" "$subscription" "$resource_group" "$name"
 
 az functionapp config appsettings delete "${target[@]}" --setting-names AzureWebJobsStorage --output none --only-show-errors ||
     fail 'Unable to select identity-based host storage. Deployment stopped.'

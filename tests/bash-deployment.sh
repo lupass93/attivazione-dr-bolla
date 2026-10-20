@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-for tool in bash cat chmod cp curl dirname find grep jq ln mkdir mktemp mv openssl rm tar unzip xmllint zip zipinfo; do
+for tool in bash basename cat chmod cp curl dirname find grep jq ln mkdir mktemp mv openssl rm tar unzip xmllint zip zipinfo; do
     command -v "$tool" >/dev/null 2>&1 || { printf 'Missing test dependency: %s\n' "$tool" >&2; exit 1; }
 done
 work=$(mktemp -d)
@@ -19,12 +19,12 @@ gallery="$work/gallery"
 mkdir -p -- "$fixture/scripts" "$fixture/function-app" "$fixture/terraform" "$bin" "$gallery"
 cp -- "$root/scripts/build.sh" "$root/scripts/deploy.sh" "$fixture/scripts/"
 tar -C "$root/function-app" --exclude='Modules/Az.*' -cf - . | tar -C "$fixture/function-app" -xf -
-for tool in bash cat chmod cp dirname find grep jq ln mkdir mktemp mv openssl rm tar unzip xmllint zip zipinfo; do
+for tool in bash basename cat chmod cp dirname find grep jq ln mkdir mktemp mv openssl rm tar unzip xmllint zip zipinfo; do
     ln -s -- "$(command -v "$tool")" "$bin/$tool"
 done
 export TEST_LOG="$work/commands.log" TEST_GALLERY="$gallery"
 export TEST_TERRAFORM_DIRECTORY="$fixture/terraform" TEST_PACKAGE="$fixture/out/function-app.zip"
-export TEST_FAILURE=
+export TEST_FAILURE='' TEST_API_HOST=test-function.azurewebsites.net
 
 cat > "$bin/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -48,6 +48,7 @@ if [[ "$url" == https://www.powershellgallery.com/* ]]; then
         *) printf 'Unexpected Gallery URL: %s\n' "$url" >&2; exit 91 ;;
     esac
 else
+    [[ "$url" == "https://$TEST_API_HOST/api/Invoke-DRReplication" || "$url" == "https://$TEST_API_HOST/api/Get-DRStatus" ]] || exit 94
     configuration=$(cat)
     [[ "$configuration" == 'header = "x-functions-key: test-key-only"' ]] || exit 92
     [[ "$*" != *test-key-only* ]] || exit 93
@@ -85,6 +86,15 @@ for argument in "$@"; do
     previous=$argument
 done
 case "$*" in
+    'functionapp show '*)
+        [[ "$TEST_FAILURE" != target ]] || exit 3
+        if [[ "$TEST_FAILURE" == hostname ]]; then
+            printf None
+        elif [[ "$TEST_FAILURE" == badhostname ]]; then
+            printf 'https://invalid-host/path'
+        else
+            printf '%s' "$TEST_API_HOST"
+        fi ;;
     'functionapp config appsettings delete '*)
         [[ "$TEST_FAILURE" != settings ]] || exit 1 ;;
     'functionapp deployment source config-zip '*)
@@ -154,6 +164,13 @@ run_case 0 'No PowerShell interpreter' bash "$fixture/scripts/build.sh" --help
 no_azure
 [[ ! -s "$TEST_LOG" ]] || exit 1
 run_case 2 'unknown build argument' bash "$fixture/scripts/build.sh" --unknown
+run_case 2 'requires a ZIP path' bash "$fixture/scripts/build.sh" --package-path
+run_case 2 'requires a ZIP path' bash "$fixture/scripts/build.sh" --package-path '   '
+run_case 2 'more than once' bash "$fixture/scripts/build.sh" --package-path one.zip --package-path two.zip
+run_case 1 'must be a ZIP file path' bash "$fixture/scripts/build.sh" --package-path artifact.txt
+mkdir -p "$work/directory.zip"
+run_case 1 'must be a ZIP file path' bash "$fixture/scripts/build.sh" --package-path "$work/directory.zip"
+run_case 1 'must be outside function-app' bash "$fixture/scripts/build.sh" --package-path "$fixture/function-app/invalid.zip"
 run_case 1 'Missing cached package' bash "$fixture/scripts/build.sh" --skip-module-download
 no_azure
 TEST_FAILURE=download run_case 1 'metadata download failed' bash "$fixture/scripts/build.sh"
@@ -169,6 +186,11 @@ if grep -Eq 'local.settings.json|Az.Obsolete|\.nuspec$|Content_Types|^function-a
 fi
 run_case 0 'Build completed:' bash "$fixture/scripts/build.sh" --skip-module-download
 [[ ! -s "$TEST_LOG" ]] || { printf '%s\n' 'Offline build made a network call.' >&2; exit 1; }
+custom_package="$work/artifacts with spaces/customer package.zip"
+run_case 0 "Build completed: $custom_package" bash "$fixture/scripts/build.sh" \
+    --skip-module-download --package-path 'artifacts with spaces/customer package.zip'
+[[ -f "$custom_package" && ! -s "$TEST_LOG" ]] || exit 1
+unzip -tq "$custom_package" >/dev/null
 previous_package=$(openssl dgst -sha256 "$TEST_PACKAGE")
 printf corrupted >> "$fixture/out/module-cache/Az.Accounts.1.0.0.nupkg"
 run_case 1 'checksum mismatch' bash "$fixture/scripts/build.sh" --skip-module-download
@@ -235,4 +257,39 @@ TEST_FAILURE=emptykey run_case 1 'Function key unavailable' bash "$fixture/scrip
 TEST_FAILURE=invoke run_case 1 'received 500/400' bash "$fixture/scripts/deploy.sh"
 TEST_FAILURE=status run_case 1 'received 400/404' bash "$fixture/scripts/deploy.sh"
 TEST_FAILURE=transport run_case 1 'Verify private network access' bash "$fixture/scripts/deploy.sh"
-printf 'PASS: %s Bash build/deploy cases; pwsh and powershell are absent from PATH; no real Azure calls.\n' "$cases"
+explicit_target=(--subscription-id test-subscription --resource-group-name test-group --function-app-name test-function)
+run_case 2 'requires a value' bash "$fixture/scripts/deploy.sh" --subscription-id
+run_case 2 'requires a value' bash "$fixture/scripts/deploy.sh" --resource-group-name '   '
+run_case 2 'requires a value' bash "$fixture/scripts/deploy.sh" --function-app-name
+run_case 2 'together' bash "$fixture/scripts/deploy.sh" --subscription-id test-subscription
+run_case 2 'together' bash "$fixture/scripts/deploy.sh" --resource-group-name test-group --function-app-name test-function
+run_case 2 'Do not mix explicit targets' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}" --terraform-directory "$fixture/terraform"
+run_case 2 'Do not mix named' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}" "$fixture/terraform"
+for option in --subscription-id --resource-group-name --function-app-name; do
+    run_case 2 'more than once' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}" "$option" duplicate
+done
+no_azure
+rm -- "$bin/terraform"
+if command -v terraform >/dev/null 2>&1; then printf '%s\n' 'Terraform must be absent for explicit-target tests.' >&2; exit 1; fi
+printf "@{\n'Az.Accounts' = '1.0.0'\n'Az.Compute' = '1.0.0'\n}\n" > "$fixture/function-app/requirements.psd1"
+run_case 0 "Build completed: $custom_package" bash "$fixture/scripts/build.sh" --skip-module-download --package-path "$custom_package"
+[[ ! -s "$TEST_LOG" ]] || exit 1
+export TEST_API_HOST=test-function-unique.westeurope-01.azurewebsites.net
+run_case 0 'Deployment verified.' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+TEST_PACKAGE="$custom_package" run_case 0 'Deployment verified.' bash "$fixture/scripts/deploy.sh" \
+    "${explicit_target[@]}" --package-path "$custom_package"
+if grep -q '^terraform ' "$TEST_LOG"; then exit 1; fi
+run_case 1 'provide an existing ZIP' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}" --package-path "$work/missing.zip"
+no_azure
+TEST_FAILURE=target run_case 1 'Unable to read the target Function App' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+if grep -Eq '^az functionapp (config|deployment)' "$TEST_LOG"; then exit 1; fi
+TEST_FAILURE=hostname run_case 1 'no valid default hostname' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+if grep -Eq '^az functionapp (config|deployment)' "$TEST_LOG"; then exit 1; fi
+TEST_FAILURE=badhostname run_case 1 'no valid default hostname' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+if grep -Eq '^az functionapp (config|deployment)' "$TEST_LOG"; then exit 1; fi
+TEST_FAILURE=deploy run_case 1 'Deployment failed' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+TEST_FAILURE=worker run_case 1 'All three functions must be indexed' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+TEST_FAILURE=transport run_case 1 'Verify private network access' bash "$fixture/scripts/deploy.sh" "${explicit_target[@]}"
+run_case 1 'Required command not found: terraform' bash "$fixture/scripts/deploy.sh"
+no_azure
+printf 'PASS: %s Bash build/deploy cases, including explicit targets and custom packages with Terraform and PowerShell absent; no real Azure calls.\n' "$cases"

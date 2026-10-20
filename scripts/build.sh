@@ -3,17 +3,18 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-Usage: bash scripts/build.sh [--skip-module-download]
+Usage: bash scripts/build.sh [--package-path ZIP] [--skip-module-download]
 
-Build out/function-app.zip from the current checkout.
+Build a local deployment ZIP without Terraform or Azure access.
 No PowerShell interpreter is used or required.
 
 Options:
+  --package-path ZIP      ZIP to create. Default: <repository>/out/function-app.zip
   --skip-module-download  Use only the existing out/module-cache NuGet packages
                          and Gallery metadata. Fail if a pinned package is absent.
   -h, --help             Show this help without building.
 
-Paths are resolved from this script's repository, not the caller's directory.
+Custom relative paths use the caller's directory; defaults use this repository.
 Requires curl, jq, zip, unzip, zipinfo, xmllint, openssl and standard Linux tools.
 Pinned versions come from function-app/requirements.psd1.
 This command does not provision Azure resources or deploy code.
@@ -26,23 +27,41 @@ fail() {
 }
 
 skip_module_download=false
+package_path=
 while (( $# )); do
     case "$1" in
-        --skip-module-download) skip_module_download=true ;;
+        --package-path)
+            if (( $# < 2 )) || [[ -z "${2//[[:space:]]/}" || "$2" == -* ]]; then
+                printf '%s\n' 'Error: --package-path requires a ZIP path.' >&2
+                exit 2
+            fi
+            [[ -z "$package_path" ]] || { printf '%s\n' 'Error: --package-path was specified more than once.' >&2; exit 2; }
+            package_path=$2
+            shift 2
+            ;;
+        --skip-module-download) skip_module_download=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'Error: unknown build argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
-    shift
 done
 
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 app="$root/function-app"
 output="$root/out"
 cache="$output/module-cache"
-for executable in curl jq zip unzip zipinfo xmllint openssl tar find chmod mktemp; do
+package_path=${package_path:-"$output/function-app.zip"}
+if [[ "$package_path" != *.[zZ][iI][pP] || -d "$package_path" ]]; then
+    fail 'Package path must be a ZIP file path, not a directory.'
+fi
+for executable in curl jq zip unzip zipinfo xmllint openssl tar find chmod mktemp dirname basename; do
     command -v "$executable" >/dev/null 2>&1 || fail "Required command not found: $executable"
 done
 [[ -f "$app/requirements.psd1" ]] || fail 'Missing function-app/requirements.psd1.'
+package_directory=$(dirname -- "$package_path")
+mkdir -p -- "$package_directory"
+package_directory=$(cd -- "$package_directory" && pwd -P)
+package_path="$package_directory/$(basename -- "$package_path")"
+[[ "$package_path" != "$app/"* ]] || fail 'Package path must be outside function-app to avoid packaging the output itself.'
 
 names=()
 versions=()
@@ -209,6 +228,6 @@ find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
 (cd -- "$stage" && zip -X -q -r "$work/function-app.zip" .) || fail 'ZIP creation failed.'
 unzip -tq "$work/function-app.zip" > "$work/unzip-check.log" || { cat "$work/unzip-check.log" >&2; fail 'Deployment ZIP integrity check failed.'; }
-mv -f -- "$work/function-app.zip" "$output/function-app.zip"
-printf 'Build completed: %s\n' "$output/function-app.zip"
-openssl dgst -sha256 "$output/function-app.zip"
+mv -f -- "$work/function-app.zip" "$package_path"
+printf 'Build completed: %s\n' "$package_path"
+openssl dgst -sha256 "$package_path"

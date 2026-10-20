@@ -1,11 +1,30 @@
+<#
+.SYNOPSIS
+Build a local deployment ZIP without Terraform or Azure access.
+.PARAMETER PackagePath
+ZIP to create. Relative paths use the caller's directory; the default is out/function-app.zip in this repository.
+.PARAMETER SkipModuleDownload
+Require the pinned modules to already exist in function-app/Modules instead of downloading them.
+#>
 [CmdletBinding()]
-param([switch]$SkipModuleDownload)
+param(
+    [switch]$SkipModuleDownload,
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$PackagePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out/function-app.zip')
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $app = Join-Path $root 'function-app'
-$output = Join-Path $root 'out'
-$package = Join-Path $output 'function-app.zip'
+$package = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PackagePath)
+if ([System.IO.Path]::GetExtension($package) -ine '.zip' -or (Test-Path -LiteralPath $package -PathType Container)) {
+    throw 'PackagePath must be a ZIP file path, not a directory.'
+}
+$comparison = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+if ($package.StartsWith($app + [System.IO.Path]::DirectorySeparatorChar, $comparison)) {
+    throw 'PackagePath must be outside function-app to avoid packaging the output itself.'
+}
+$output = Split-Path $package -Parent
 $versions = Import-PowerShellDataFile (Join-Path $app 'requirements.psd1')
 
 foreach ($module in $versions.GetEnumerator()) {
