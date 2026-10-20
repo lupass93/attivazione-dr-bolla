@@ -6,18 +6,81 @@ fail() {
     exit 1
 }
 
-if (( $# > 2 )); then
-    fail 'Usage: bash scripts/deploy.sh [terraform-directory] [package-path]'
-fi
+usage() {
+    cat <<'USAGE'
+Usage: bash scripts/deploy.sh [--terraform-directory DIRECTORY] [--package-path ZIP]
+   or: bash scripts/deploy.sh [terraform-directory] [package-path]
 
+Deploy an existing package using the selected Terraform outputs.
+
+Options:
+  --terraform-directory DIRECTORY  Terraform root/state used to select the target.
+                                  Default: <repository>/terraform
+  --package-path ZIP               Existing deployment ZIP.
+                                  Default: <repository>/out/function-app.zip
+  -h, --help                       Show help without deploying.
+
+Named and positional arguments cannot be mixed. Custom relative paths are
+relative to the caller's directory; default paths are relative to this script.
+This command does not build, provision infrastructure or start DR replication.
+Requires terraform, az, jq, curl and private connectivity.
+USAGE
+}
+
+usage_error() {
+    printf 'Error: %s\n' "$1" >&2
+    usage >&2
+    exit 2
+}
+
+terraform_directory=
+package_path=
+named=false
+positional=()
+while (( $# )); do
+    case "$1" in
+        --terraform-directory)
+            if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+                usage_error '--terraform-directory requires a directory.'
+            fi
+            [[ -z "$terraform_directory" ]] || usage_error '--terraform-directory was specified more than once.'
+            terraform_directory=$2
+            named=true
+            shift 2
+            ;;
+        --package-path)
+            if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+                usage_error '--package-path requires a ZIP path.'
+            fi
+            [[ -z "$package_path" ]] || usage_error '--package-path was specified more than once.'
+            package_path=$2
+            named=true
+            shift 2
+            ;;
+        -h|--help) usage; exit 0 ;;
+        --)
+            shift
+            positional+=("$@")
+            break
+            ;;
+        -*) usage_error "Unknown deploy option: $1" ;;
+        *) positional+=("$1"); shift ;;
+    esac
+done
+(( ${#positional[@]} <= 2 )) || usage_error 'At most two positional paths are supported.'
+if [[ "$named" == true ]] && (( ${#positional[@]} )); then
+    usage_error 'Do not mix named and positional paths.'
+fi
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-terraform_directory=${1:-"$root/terraform"}
-package_path=${2:-"$root/out/function-app.zip"}
+if (( ${#positional[@]} >= 1 )); then terraform_directory=${positional[0]}; fi
+if (( ${#positional[@]} == 2 )); then package_path=${positional[1]}; fi
+terraform_directory=${terraform_directory:-"$root/terraform"}
+package_path=${package_path:-"$root/out/function-app.zip"}
 
 for executable in terraform az jq curl; do
     command -v "$executable" >/dev/null 2>&1 || fail "Required command not found: $executable"
 done
-[[ -f "$package_path" ]] || fail 'Run scripts/build.ps1 before deploying, or provide an existing ZIP.'
+[[ -f "$package_path" ]] || fail 'Run scripts/build.sh (or scripts/build.ps1) before deploying, or provide an existing ZIP.'
 
 outputs=$(terraform "-chdir=$terraform_directory" output -json) || fail 'Terraform outputs unavailable. Apply the infrastructure first.'
 subscription=$(jq -er '.hosting_subscription_id.value | strings | select(length > 0)' <<< "$outputs") || fail 'Missing hosting_subscription_id output.'

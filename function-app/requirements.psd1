@@ -1,5 +1,5 @@
 # requirements.psd1
-# Pinned dependencies bundled by scripts/build.ps1; host managed dependencies are disabled.
+# Pinned dependencies bundled by the build scripts; host managed dependencies are disabled.
 
 @{
     'Az.Accounts'  = '5.4.0'

@@ -14,6 +14,8 @@ foreach ($test in @('multisubscription.ps1', 'direct-disk-copy.ps1', 'session-su
     & pwsh -NoLogo -NoProfile -File (Join-Path $root "tests/$test")
     if ($LASTEXITCODE -ne 0) { throw "Test failed: $test" }
 }
+& bash (Join-Path $root 'tests/bash-deployment.sh')
+if ($LASTEXITCODE -ne 0) { throw 'Bash build/deployment tests failed.' }
 terraform "-chdir=$(Join-Path $root 'terraform')" test -no-color
 if ($LASTEXITCODE -ne 0) { throw 'Terraform tests failed.' }
 Write-Host 'PASS: all local DR regression and session tests.'
