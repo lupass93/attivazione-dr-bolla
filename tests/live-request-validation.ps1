@@ -27,6 +27,16 @@ try {
     $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
         -Body (@{ sessionId = $id; csvBlobPath = $path } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 400) 'Duplicate rows must be rejected.'
+    foreach ($csv in @(
+        "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nUnknown,APP01,source,rg,vm",
+        "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),,source,rg,vm",
+        "SourceSubscription,SourceResourceGroup,SourceVmName`nsource,rg,vm"
+    )) {
+        Write-LiveDRCsv $csv $path
+        $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
+            -Body (@{ sessionId = $id; csvBlobPath = $path } | ConvertTo-Json)
+        Assert-LiveDR ($response.Code -eq 400) 'Unknown RTO, missing acronym and old three-column CSV must be rejected.'
+    }
     $response = Invoke-LiveDRRequest "Get-DRStatus?sessionId=$id"
     Assert-LiveDR ($response.Code -eq 404) 'Rejected CSVs must not leave an accepted session.'
     Save-LiveDREvidence 'request-validation' @{ rejectedSessionId = $id; persistedSession = $false }

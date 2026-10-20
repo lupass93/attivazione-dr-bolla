@@ -296,6 +296,8 @@ Il comando esegue le regressioni multisubscription e copia diretta, i nuovi test
 
 I tre script live sono separati dai test locali per non avviare accidentalmente risorse: [validazione delle richieste](tests/live-request-validation.ps1), [preflight negativo](tests/live-preflight.ps1) e [attivazione e verifica Azure](tests/live-session.ps1). Leggono gli output Terraform locali, richiedono login e ruoli di verifica sulle risorse del lab e conservano prove in `out/live`, esclusa da Git. Gli ultimi due richiedono `-CsvBlobPath`, `-TargetSubscriptionId` e `-TargetResourceGroup`. Preparare soltanto risorse di test autorizzate; il test negativo richiede un ASG DR deliberatamente assente, mentre quello positivo richiede una destinazione workload inizialmente vuota e una NIC sorgente con ASG/backend pool. Non eseguirli su un ambiente cliente senza approvazione.
 
+Il nuovo [collaudo live delle quattro priorita](tests/live-csv-priority.ps1) usa gli stessi tre parametri e richiede quattro VM sorgenti, una per classe, elencate nel CSV in ordine inverso. Verifica il piano ordinato, gli istanti di inizio/fine dei tentativi, il formato JSON durante l'avanzamento, i log per stage e l'ordine effettivo di creazione delle VM in Azure. Le destinazioni devono essere inizialmente vuote; il test crea workload reali.
+
 | Quale requisito viene verificato | Quale prova ne dimostra il comportamento |
 |---|---|
 | REQ-ASYNC-001: conservare multisubscription e copia diretta. | Regressioni di routing/contesti e 16 scenari di copia senza comandi snapshot. |
@@ -308,9 +310,9 @@ I tre script live sono separati dai test locali per non avviare accidentalmente 
 | REQ-CSVLOG-003: allineare JSON e log senza perdere il contesto Azure. | Nomi/tipi dei blocchi cliente, contatori coerenti, VM omonime, acronimo nei risultati e nei log, stato persistente uguale alla proiezione pubblica. |
 | CON-ASYNC-001: vietare fallback dati pubblico. | Terraform configura Private Endpoint/identita; il codice rifiuta risoluzioni non private e connessioni non HTTPS. Il collaudo Azure deve verificarne il percorso effettivo. |
 
-### Quale collaudo reale e stato completato il 20 ottobre 2026
+### Quale collaudo storico del ramo padre era stato completato il 20 ottobre 2026
 
-Il test ha usato una Function separata dalla consegna precedente, nello stesso tenant del laboratorio, con una coppia primaria/DR reale. L'infrastruttura ha creato 29 risorse aggiuntive senza aggiornare o distruggere risorse gestite preesistenti nel piano Terraform. Le connessioni Function/Blob/Queue/Table sono private; l'accesso pubblico di Function e storage e disabilitato.
+Il test seguente riguarda il ramo padre `feature/async-session-id`, non certifica le nuove colonne o il report per criticita. Ha usato una Function separata dalla consegna precedente, nello stesso tenant del laboratorio, con una coppia primaria/DR reale. L'infrastruttura ha creato 29 risorse aggiuntive senza aggiornare o distruggere risorse gestite preesistenti nel piano Terraform. Le connessioni Function/Blob/Queue/Table sono private; l'accesso pubblico di Function e storage e disabilitato.
 
 | Quale flusso e stato verificato | Quale esito e stato osservato |
 |---|---|
@@ -356,4 +358,5 @@ La documentazione presuppone prerequisiti e autorizzazioni predisposti dall'orga
 - Passaggi 9-10: [Queue trigger, identita, riconsegne e poison queue](https://learn.microsoft.com/azure/azure-functions/functions-bindings-storage-queue-trigger), [configurazione di concorrenza e encoding](https://learn.microsoft.com/azure/azure-functions/functions-bindings-storage-queue#host-json).
 - Rete: [Private Endpoint e integrazione VNet di Azure Functions](https://learn.microsoft.com/azure/azure-functions/functions-networking-options), [identita gestite](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview).
 - Runtime e limiti: [PowerShell 7.6](https://learn.microsoft.com/azure/azure-functions/functions-reference-powershell#powershell-versions), [timeout di esecuzione e HTTP](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
+- Ordinamento: [Sort-Object con ordine stabile](https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/sort-object?view=powershell-7.6) e [assenza di garanzia FIFO in Storage Queue](https://learn.microsoft.com/azure/service-bus-messaging/service-bus-azure-and-service-bus-queues-compared-contrasted#foundational-capabilities). La coda trasporta una sessione, non decide la priorita delle sue VM.
 - Permessi: [ruoli dati Storage](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/storage), [ruoli Compute](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/compute).
