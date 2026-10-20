@@ -1,0 +1,5 @@
+Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName
+Non critico (RTO oltre le 360 ore),APP04,site-a,rg-workload,vm-noncritical
+Critico (RTO da 72 a 360 ore),APP03,site-a,rg-workload,vm-critical
+Altamente critico (RTO <= 48 ore),APP02,site-a,rg-workload,vm-high
+Sistemico (2h),APP01,site-a,rg-workload,vm-systemic

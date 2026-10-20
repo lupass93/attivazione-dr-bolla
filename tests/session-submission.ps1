@@ -1,6 +1,6 @@
 . (Join-Path $PSScriptRoot 'SessionTestSupport.ps1')
 $id = '11111111-1111-4111-8111-111111111111'
-$csv = "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-one"
+$csv = "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-one"
 Set-TestCsv $csv
 $binaryId = '88888888-8888-4888-8888-888888888888'
 Set-TestCsv $csv -Path 'binary.csv' -Binary
@@ -15,10 +15,10 @@ foreach ($body in @(@{}, @{ sessionId = 'invalid'; csvBlobPath = 'vms.csv' }, '{
 Assert-Test ($global:QueueMessages.Count -eq 0) 'Validation failures must not enqueue work.'
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'missing.csv' }
 Assert-Test ([int]$response.StatusCode -eq 404) 'Missing CSV must return 404.'
-Set-TestCsv "$csv`nsource-a,rg-web,vm-one"
+Set-TestCsv "$csv`nSistemico (2h),APP01,source-a,rg-web,vm-one"
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
 Assert-Test ([int]$response.StatusCode -eq 400) 'Duplicate CSV rows must be rejected.'
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,,vm-one"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,,vm-one"
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
 Assert-Test ([int]$response.StatusCode -eq 400) 'An incomplete CSV row must not be silently skipped.'
 Set-TestCsv $csv
@@ -43,7 +43,7 @@ Set-TestCsv $csv -Path 'VMS.csv'
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'VMS.csv' }
 Assert-Test ([int]$response.StatusCode -eq 409) 'Blob paths are case-sensitive even when CSV contents are identical.'
 $stored = Read-DRDocument $global:TestClient "sessions/$id/request.json"
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-new"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-new"
 $response = Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' }
 Assert-Test ([int]$response.StatusCode -eq 409) 'A different CSV must not reuse a sessionId.'
 Assert-Test ($stored.Value.rows[0].SourceVmName -eq 'vm-one') 'The original session manifest must remain immutable.'

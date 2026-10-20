@@ -136,6 +136,63 @@ function Get-DRSessionState {
     return Read-DRDocument $Client "sessions/$SessionId/state.json"
 }
 
+function Get-DRPriorityReport {
+    param([System.Collections.IDictionary]$State)
+    $classes = @('sistemico', 'altamente-critico', 'critico', 'non-critico')
+    $keys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($row in $State.results) {
+        if ($row.priorityClass -notin $classes -or [string]::IsNullOrWhiteSpace([string]$row.resourceKey) -or
+            -not $keys.Add([string]$row.resourceKey)) {
+            throw 'The stored session has invalid priority metadata or duplicate Azure resource keys.'
+        }
+    }
+    $report = [ordered]@{
+        id = [string]$State.sessionId
+        activity = 'dr-activation'
+        running = $(if ($State.status -in @('SUCCEEDED', 'FAILED')) { 'false' } else { 'true' })
+    }
+    foreach ($class in $classes) {
+        $rows = @($State.results | Where-Object { $_.priorityClass -eq $class })
+        $completed = [System.Collections.Generic.List[string]]::new()
+        $pending = [System.Collections.Generic.List[string]]::new()
+        $errors = [ordered]@{}
+        foreach ($row in $rows) {
+            $key = [string]$row.resourceKey
+            switch ($row.status) {
+                'SUCCEEDED' { $completed.Add($key) }
+                'FAILED' {
+                    $errors[$key] = if ([string]::IsNullOrWhiteSpace([string]$row.error)) {
+                        'Failure recorded without a VM error detail. Inspect the session error and Azure stage logs.'
+                    } else { [string]$row.error }
+                }
+                { $_ -in @('QUEUED', 'PREFLIGHT', 'PREFLIGHT_PASSED', 'RUNNING', 'NOT_STARTED') } { $pending.Add($key) }
+                default { throw "Unsupported VM status '$($row.status)' in the priority report." }
+            }
+        }
+        $report[$class] = [ordered]@{
+            resource_completed = @($completed)
+            resource_completed_count = [string]$completed.Count
+            resource_pending = @($pending)
+            resource_pending_count = [string]$pending.Count
+            resource_error = $errors
+            resource_error_count = [string]$errors.Count
+            resource_total = [string]$rows.Count
+        }
+    }
+    return $report
+}
+
+function Write-DRSessionState {
+    param(
+        [hashtable]$Client, [string]$SessionId, [System.Collections.IDictionary]$State,
+        [string]$ETag, [switch]$CreateOnly
+    )
+    if ($State.schemaVersion -ge 2) {
+        foreach ($entry in (Get-DRPriorityReport $State).GetEnumerator()) { $State[$entry.Key] = $entry.Value }
+    }
+    return Write-DRDocument $Client "sessions/$SessionId/state.json" $State -ETag $ETag -CreateOnly:$CreateOnly
+}
+
 function Update-DRSessionState {
     param(
         [hashtable]$Client, [string]$SessionId, [hashtable]$Changes,
@@ -158,7 +215,7 @@ function Update-DRSessionState {
             foreach ($key in $Changes.Keys) { $state[$key] = $Changes[$key] }
         }
         $state.updatedAt = [datetime]::UtcNow.ToString('o')
-        if (Write-DRDocument $Client "sessions/$SessionId/state.json" $state -ETag $record.ETag) { return $state }
+        if (Write-DRSessionState $Client $SessionId $state -ETag $record.ETag) { return $state }
         Write-Host "Session $SessionId changed concurrently; retrying the conditional state update."
     }
     throw "Session '$SessionId' state remained busy after five conditional writes."
@@ -185,6 +242,24 @@ function Get-DRReplicationSettings {
     return $settings
 }
 
+function Resolve-DRCriticality {
+    param([string]$Criticita)
+    $normalized = ($Criticita.Trim() -replace '\s+', ' ').ToLowerInvariant()
+    switch ($normalized) {
+        { $_ -in @('sistemico (rto 2 ore)', 'sistemico (2h)') } { return @{ Class = 'sistemico'; Priority = 1 } }
+        { $_ -in @('altamente critico (rto <= 48 ore)', 'altamente critico (4h adatto a rto 4 8 24 o 48h)') } {
+            return @{ Class = 'altamente-critico'; Priority = 2 }
+        }
+        { $_ -in @('critico (rto da 72 a 360 ore)', 'critico (72h adatto a rto 72 120 o 360h)') } {
+            return @{ Class = 'critico'; Priority = 3 }
+        }
+        { $_ -in @('non critico (best effort adatto a rto oltre le 360h)', 'non critico (rto oltre le 360 ore)') } {
+            return @{ Class = 'non-critico'; Priority = 4 }
+        }
+        default { Stop-DRRequest 400 "Unsupported Criticita '$Criticita'. Use one of the documented customer RTO labels." }
+    }
+}
+
 function Read-DRCsvRequest {
     param([hashtable]$Client, [string]$CsvBlobPath)
     if ([string]::IsNullOrWhiteSpace($CsvBlobPath) -or $CsvBlobPath.Length -gt 1024 -or
@@ -201,26 +276,43 @@ function Read-DRCsvRequest {
     try { $rows = @($content | ConvertFrom-Csv -ErrorAction Stop) }
     catch { Stop-DRRequest 400 'The CSV cannot be parsed.' }
     if ($rows.Count -eq 0 -or $rows.Count -gt 500) { Stop-DRRequest 400 'The CSV must contain between 1 and 500 VM rows.' }
+    $columns = @('Criticita', 'Acronimo', 'SourceSubscription', 'SourceResourceGroup', 'SourceVmName')
+    $actualColumns = @($rows[0].PSObject.Properties.Name)
+    $normalizedColumns = @($actualColumns | ForEach-Object { $_.Trim().TrimStart([char]0xFEFF) -replace "^'(.*)'$", '$1' })
+    if ($actualColumns.Count -ne $columns.Count -or
+        ($normalizedColumns -join ',') -ine ($columns -join ',')) {
+        Stop-DRRequest 400 'CSV columns must be Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName in that order.'
+    }
     $valid = [System.Collections.Generic.List[object]]::new()
     $identities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $rowNumber = 0
     foreach ($row in $rows) {
+        $rowNumber++
         $values = @{}
-        foreach ($column in @('SourceSubscription', 'SourceResourceGroup', 'SourceVmName')) {
-            $property = $row.PSObject.Properties[$column]
+        for ($columnIndex = 0; $columnIndex -lt $columns.Count; $columnIndex++) {
+            $column = $columns[$columnIndex]
+            $property = $row.PSObject.Properties[$actualColumns[$columnIndex]]
             if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                Stop-DRRequest 400 "Every CSV row requires SourceSubscription, SourceResourceGroup and SourceVmName; '$column' is missing."
+                Stop-DRRequest 400 "CSV row $rowNumber requires all five columns; '$column' is missing."
             }
             $values[$column] = ([string]$property.Value).Trim()
-            if ($values[$column].Contains('/') -or $values[$column].Contains('\')) {
+            if ($column -in @('SourceSubscription', 'SourceResourceGroup', 'SourceVmName') -and
+                ($values[$column].Contains('/') -or $values[$column].Contains('\'))) {
                 Stop-DRRequest 400 "CSV column '$column' must not contain path separators."
             }
+            if ($values[$column] -match '[\x00-\x1F\x7F]') { Stop-DRRequest 400 "CSV column '$column' must not contain control characters." }
         }
+        $criticality = Resolve-DRCriticality $values.Criticita
+        $values['PriorityClass'] = $criticality.Class
+        $values['Priority'] = $criticality.Priority
+        $values['CsvRow'] = $rowNumber
         $key = "$($values.SourceSubscription)/$($values.SourceResourceGroup)/$($values.SourceVmName)"
         if (-not $identities.Add($key)) { Stop-DRRequest 400 "The CSV contains a duplicate VM row: '$key'." }
+        $values['ResourceKey'] = $key.ToLowerInvariant()
         $valid.Add($values)
     }
     return @{
-        rows = @($valid)
+        rows = @($valid | Sort-Object Priority, CsvRow -Stable)
         csvSha256 = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
         csvETag = [string]@($response.Headers['ETag'])[0]
     }
@@ -229,7 +321,7 @@ function Read-DRCsvRequest {
 function Register-DRSession {
     param([hashtable]$Client, [string]$SessionId, [string]$CsvBlobPath, [hashtable]$Csv)
     $manifest = [ordered]@{
-        schemaVersion = 1; sessionId = $SessionId; csvBlobPath = $CsvBlobPath
+        schemaVersion = 2; sessionId = $SessionId; csvBlobPath = $CsvBlobPath
         csvSha256 = $Csv.csvSha256; csvETag = $Csv.csvETag
         createdAt = [datetime]::UtcNow.ToString('o'); rows = @($Csv.rows)
         replicationSettings = Get-DRReplicationSettings
@@ -242,21 +334,31 @@ function Register-DRSession {
         }
         $manifest = $existing.Value
     }
+    $activationOrder = 0
     $state = [ordered]@{
-        schemaVersion = 1; sessionId = $SessionId; status = 'PENDING'; phase = 'Submission'
+        schemaVersion = $manifest.schemaVersion; sessionId = $SessionId; status = 'PENDING'; phase = 'Submission'
         createdAt = $manifest.createdAt; updatedAt = $manifest.createdAt; acceptedAt = $null
         startedAt = $null; completedAt = $null; queueConfirmed = $false; messageId = $null
         submissionError = $null; error = $null; requiresReview = $false
         csvBlobPath = $manifest.csvBlobPath; csvSha256 = $manifest.csvSha256
         results = @($manifest.rows | ForEach-Object {
-            @{
+            $activationOrder++
+            $result = @{
                 sourceSubscription = $_.SourceSubscription; sourceResourceGroup = $_.SourceResourceGroup
                 vmName = $_.SourceVmName; sourceSubscriptionId = $null; targetSubscriptionId = $null
                 status = 'QUEUED'; error = $null
             }
+            if ($manifest.schemaVersion -ge 2) {
+                $result['criticita'] = $_.Criticita; $result['acronimo'] = $_.Acronimo
+                $result['priorityClass'] = $_.PriorityClass; $result['priority'] = $_.Priority
+                $result['csvRow'] = $_.CsvRow; $result['activationOrder'] = $activationOrder
+                $result['resourceKey'] = $_.ResourceKey
+                $result['startedAt'] = $null; $result['completedAt'] = $null
+            }
+            $result
         })
     }
-    $created = Write-DRDocument $Client "sessions/$SessionId/state.json" $state -CreateOnly
+    $created = Write-DRSessionState $Client $SessionId $state -CreateOnly
     if (-not $created) { Write-Host "Session $SessionId already exists; preserving its stored state." }
     return (Get-DRSessionState $Client $SessionId).Value
 }
@@ -284,7 +386,7 @@ function Submit-DRSession {
 function Get-DRSessionResponse {
     param([System.Collections.IDictionary]$State)
     $results = @($State.results)
-    return [ordered]@{
+    $response = [ordered]@{
         sessionId = $State.sessionId; status = $State.status; phase = $State.phase
         createdAt = $State.createdAt; acceptedAt = $State.acceptedAt; startedAt = $State.startedAt
         updatedAt = $State.updatedAt; completedAt = $State.completedAt
@@ -299,8 +401,14 @@ function Get-DRSessionResponse {
             notStarted = @($results | Where-Object status -eq 'NOT_STARTED').Count
         }
     }
+    if ($State.schemaVersion -ge 2) {
+        $response['schemaVersion'] = $State.schemaVersion
+        $response['platform'] = 'azure'
+        foreach ($entry in (Get-DRPriorityReport $State).GetEnumerator()) { $response[$entry.Key] = $entry.Value }
+    }
+    return $response
 }
 
 Export-ModuleMember -Function Stop-DRRequest, ConvertTo-DRSessionId, New-DRStorageClient, Read-DRDocument, `
     Write-DRDocument, Get-DRSessionState, Update-DRSessionState, Read-DRCsvRequest, Register-DRSession, `
-    Submit-DRSession, Get-DRSessionResponse
+    Submit-DRSession, Get-DRSessionResponse, Resolve-DRCriticality, Write-DRSessionState

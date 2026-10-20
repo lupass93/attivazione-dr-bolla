@@ -1,8 +1,8 @@
 . (Join-Path $PSScriptRoot 'SessionTestSupport.ps1')
 $id = '22222222-2222-4222-8222-222222222222'
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-one`nsource-b,rg-web,vm-two"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-one`nSistemico (2h),APP02,source-b,rg-web,vm-two"
 Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' } | Out-Null
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-changed"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-changed"
 Invoke-TestWorker $id
 $state = (Get-DRSessionState $global:TestClient $id).Value
 Assert-Test ($state.status -eq 'SUCCEEDED' -and $state.results.Count -eq 2) 'The worker must execute the persisted CSV snapshot.'
@@ -18,7 +18,7 @@ Invoke-TestWorker $nativeId -NativePayload
 Assert-Test ((Get-DRSessionState $global:TestClient $nativeId).Value.status -eq 'SUCCEEDED') 'The real PowerShell binding may provide an already deserialized hashtable, not JSON text.'
 
 $id2 = '33333333-3333-4333-8333-333333333333'
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-one`nsource-b,rg-web,vm-two"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-one`nSistemico (2h),APP02,source-b,rg-web,vm-two"
 Invoke-TestSubmission @{ sessionId = $id2; csvBlobPath = 'vms.csv' } | Out-Null
 $global:PreflightFailures = @('vm-two')
 $before = $global:CoreCalls.Count

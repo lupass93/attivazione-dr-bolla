@@ -18,12 +18,12 @@ try {
     $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
         -Body (@{ sessionId = $id; csvBlobPath = "dr-tests/$id-missing.csv" } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 404) 'A nonexistent CSV must return 404.'
-    Write-LiveDRCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource,,vm" $path
+    Write-LiveDRCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source,,vm" $path
     $csvCreated = $true
     $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
         -Body (@{ sessionId = $id; csvBlobPath = $path } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 400) 'A missing column value must reject the complete request.'
-    Write-LiveDRCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource,rg,vm`nsource,rg,vm" $path
+    Write-LiveDRCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source,rg,vm`nSistemico (2h),APP01,source,rg,vm" $path
     $response = Invoke-LiveDRRequest Invoke-DRReplication -Method POST `
         -Body (@{ sessionId = $id; csvBlobPath = $path } | ConvertTo-Json)
     Assert-LiveDR ($response.Code -eq 400) 'Duplicate rows must be rejected.'

@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 2,
+  "platform": "azure",
+  "sessionId": "11111111-1111-4111-8111-111111111111",
+  "id": "11111111-1111-4111-8111-111111111111",
+  "activity": "dr-activation",
+  "running": "true",
+  "status": "RUNNING",
+  "phase": "Replication",
+  "sistemico": {
+    "resource_completed": ["site-a/rg-workload/vm-systemic"],
+    "resource_completed_count": "1",
+    "resource_pending": [],
+    "resource_pending_count": "0",
+    "resource_error": {},
+    "resource_error_count": "0",
+    "resource_total": "1"
+  },
+  "altamente-critico": {
+    "resource_completed": [],
+    "resource_completed_count": "0",
+    "resource_pending": [],
+    "resource_pending_count": "0",
+    "resource_error": {
+      "site-a/rg-workload/vm-high": "Azure provisioning failed; inspect the stage log."
+    },
+    "resource_error_count": "1",
+    "resource_total": "1"
+  },
+  "critico": {
+    "resource_completed": [],
+    "resource_completed_count": "0",
+    "resource_pending": ["site-a/rg-workload/vm-critical"],
+    "resource_pending_count": "1",
+    "resource_error": {},
+    "resource_error_count": "0",
+    "resource_total": "1"
+  },
+  "non-critico": {
+    "resource_completed": [],
+    "resource_completed_count": "0",
+    "resource_pending": ["site-a/rg-workload/vm-noncritical"],
+    "resource_pending_count": "1",
+    "resource_error": {},
+    "resource_error_count": "0",
+    "resource_total": "1"
+  },
+  "results": [
+    {
+      "resourceKey": "site-a/rg-workload/vm-systemic",
+      "vmName": "vm-systemic",
+      "criticita": "Sistemico (2h)",
+      "acronimo": "APP01",
+      "priorityClass": "sistemico",
+      "priority": 1,
+      "activationOrder": 1,
+      "status": "SUCCEEDED",
+      "error": null
+    },
+    {
+      "resourceKey": "site-a/rg-workload/vm-high",
+      "vmName": "vm-high",
+      "criticita": "Altamente critico (RTO <= 48 ore)",
+      "acronimo": "APP02",
+      "priorityClass": "altamente-critico",
+      "priority": 2,
+      "activationOrder": 2,
+      "status": "FAILED",
+      "error": "Azure provisioning failed; inspect the stage log."
+    },
+    {
+      "resourceKey": "site-a/rg-workload/vm-critical",
+      "vmName": "vm-critical",
+      "criticita": "Critico (RTO da 72 a 360 ore)",
+      "acronimo": "APP03",
+      "priorityClass": "critico",
+      "priority": 3,
+      "activationOrder": 3,
+      "status": "RUNNING",
+      "error": null
+    },
+    {
+      "resourceKey": "site-a/rg-workload/vm-noncritical",
+      "vmName": "vm-noncritical",
+      "criticita": "Non critico (RTO oltre le 360 ore)",
+      "acronimo": "APP04",
+      "priorityClass": "non-critico",
+      "priority": 4,
+      "activationOrder": 4,
+      "status": "QUEUED",
+      "error": null
+    }
+  ]
+}

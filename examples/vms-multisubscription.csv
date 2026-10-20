@@ -1,3 +1,3 @@
-SourceSubscription,SourceResourceGroup,SourceVmName
-site-a,rg-web,vm-web
-site-b,rg-web,vm-web
+Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName
+Sistemico (2h),APP01,site-a,rg-web,vm-web
+Altamente critico (RTO <= 48 ore),APP02,site-b,rg-web,vm-web

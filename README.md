@@ -1,8 +1,8 @@
-# Attivazione Bolla: replica asincrona identificata dal client
+# Attivazione Bolla: replica asincrona ordinata per criticita applicativa
 
 La soluzione ricrea Virtual Machine (VM), server virtuali Azure, in un ambiente di Disaster Recovery (DR), cioe di ripristino. Azure Functions esegue PowerShell 7.6 sul piano Flex Consumption. Il codice deriva da [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla).
 
-**Questo README descrive `feature/async-session-id`.** La base `delivery` contiene gia il routing multisubscription e la copia diretta dei managed disk, dischi gestiti da Azure, senza snapshot intermedi. Uno snapshot e una copia puntuale conservata come risorsa separata; questo flusso non ne crea, legge o riusa.
+**Questo README descrive `feature/async-session-id-csv-log`, derivato da `feature/async-session-id`.** Git non permette il nome `feature/async-session-id/csv-log` mentre esiste il ramo padre: il nome alternativo mantiene intatto il padre. Questa versione aggiunge criticita, acronimo e report compatibile con il tracciato cliente. Restano routing multisubscription e copia diretta dei managed disk, dischi gestiti da Azure, senza snapshot intermedi. Uno snapshot e una copia puntuale conservata come risorsa separata; questo flusso non ne crea, legge o riusa.
 
 ## Quale architettura viene distribuita
 
@@ -77,9 +77,26 @@ Il Comma-Separated Values (CSV) e un file tabellare con colonne separate da virg
 
 | Quale colonna compilare | Quale risorsa identifica |
 |---|---|
+| `Criticita` | Classe di Recovery Time Objective (RTO), obiettivo di tempo massimo di ripristino, usata per ordinare le attivazioni. Non costituisce una garanzia di tempo. |
+| `Acronimo` | Identificativo dell'applicazione presente sulla VM, conservato nei risultati e nei log. Piu VM possono avere lo stesso acronimo. |
 | `SourceSubscription` | Nome o identificatore della subscription primaria. |
 | `SourceResourceGroup` | Resource Group della VM sorgente. |
 | `SourceVmName` | Nome esatto della VM da replicare. |
+
+Le cinque colonne devono comparire nell'ordine `Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`, senza colonne GCP. Sono accettati header CSV standard e i nomi `'Criticita','Acronimo'` racchiusi negli apostrofi del riferimento. Valori vuoti, classi non riconosciute e vecchi CSV a tre colonne producono HTTP 400 prima dell'accodamento.
+
+### Quale ordine di attivazione applica il worker
+
+| Quale classe viene eseguita | Quali etichette cliente sono accettate |
+|---|---|
+| 1. `sistemico`. | `SISTEMICO (RTO 2 ore)`, `Sistemico (RTO 2 ore)`, `Sistemico (2h)`. |
+| 2. `altamente-critico`. | `Altamente critico (RTO <= 48 ore)`, `Altamente critico (4h  adatto a RTO 4  8  24 o 48h)`. |
+| 3. `critico`. | `Critico (RTO da 72 a 360 ore)`, `Critico (72h  adatto a RTO 72  120 o 360h)`. |
+| 4. `non-critico`. | `Non critico (best effort  adatto a RTO oltre le 360h)`, `Non critico (RTO oltre le 360 ore)`. |
+
+Maiuscole/minuscole e spazi ripetuti non modificano la classe. Il piano registrato contiene righe ordinate per priorita e, a parita di classe, per posizione originale nel CSV. Ogni tentativo termina prima di iniziare il successivo; un errore di replica non riordina o sopprime i tentativi indipendenti successivi. I prerequisiti di tutte le righe devono comunque passare prima della prima creazione.
+
+L'ordine vale **all'interno della sessione**, non tra messaggi di sessioni diverse: Azure Queue Storage non viene usato come scheduler globale. Le classi non descrivono dipendenze applicative e non coordinano database o cluster. Il test [CSV disordinato](examples/vms-priorities.csv) mostra una VM per classe nell'ordine inverso.
 
 Il worker risolve la primaria tramite UAMI sorgente e la relativa DR tramite UAMI DR: **nome primario + `target_subscription_suffix`**, predefinito `-DR`. La destinazione deve essere unica, abilitata, distinta dalla sorgente e nello stesso tenant Microsoft Entra, la directory delle identita. Non esiste una destinazione globale di fallback.
 
@@ -95,8 +112,8 @@ Un Application Security Group (ASG) raggruppa NIC per l'applicazione delle regol
 
 1. **Il client genera un UUID nuovo.** Il client conserva `sessionId` prima di inviare la richiesta, quindi puo ritrovare la sessione anche se perde la risposta.
 2. **Il client invia `sessionId` e `csvBlobPath` a Invoke.** La function key, un segreto condiviso valido fino alla rotazione, autorizza l'endpoint e viene trasportata nell'header `x-functions-key`.
-3. **Invoke valida l'intera struttura del CSV.** Richiede tutte e tre le colonne per ogni riga, rifiuta duplicati e percorsi non validi; non scarta righe incomplete. Accetta 1-500 VM e un file fino a 1 MiB.
-4. **Invoke registra la richiesta originale.** Blob Storage conserva `sessions/<sessionId>/request.json`: righe, impostazioni di replica, versione del blob e SHA-256, impronta crittografica del CSV. La registrazione e create-only, cioe non sovrascrive una richiesta esistente.
+3. **Invoke valida l'intera struttura del CSV.** Richiede tutte e cinque le colonne per ogni riga, una criticita riconosciuta e un acronimo valorizzato; rifiuta duplicati e percorsi non validi. Accetta 1-500 VM e un file fino a 1 MiB.
+4. **Invoke registra il piano immutabile ordinato.** Blob Storage conserva `sessions/<sessionId>/request.json`: righe, posizione originale, priorita, impostazioni di replica, versione del blob e SHA-256, impronta crittografica del CSV. La registrazione e create-only, cioe non sovrascrive una richiesta esistente.
 5. **Invoke registra lo stato iniziale e accoda il riferimento.** Il messaggio contiene soltanto versione del formato e `sessionId`, non un CSV che potrebbe essere modificato successivamente. Il client storage attende esplicitamente HTTP 201 dalla Queue prima di preparare HTTP 202.
 6. **Il worker acquisisce lo stato con una scrittura condizionale.** Blob Storage confronta l'ETag, identificatore della versione del file: soltanto un concorrente puo acquisire quella versione della sessione. Il worker conserva l'identificativo del messaggio proprietario.
 7. **Il worker esegue il preflight di tutte le righe.** Scopre sorgenti e destinazioni, valida la copia diretta e verifica esistenza/accessibilita dei prerequisiti. Se una riga fallisce, registra le non conformita rilevate e non crea workload per nessuna riga.
@@ -132,6 +149,28 @@ La richiesta Invoke contiene esattamente:
 La risposta accettata contiene `sessionId`, stato corrente, conteggi, orari e `statusUrl`. L'header `Location` indica la stessa URL relativa; `Retry-After: 5` suggerisce cinque secondi tra le consultazioni. I nomi precedenti dell'identificativo e gli override di parallelismo non sono accettati.
 
 Get-DRStatus richiede `GET /api/Get-DRStatus?sessionId=<UUID>` oppure POST con `{"sessionId":"<UUID>"}`. Non richiede `csvBlobPath`. La risposta include gli esiti per VM e non usa successi di altre sessioni.
+
+### Come il report conserva il formato abituale del cliente
+
+Le nuove sessioni hanno `schemaVersion=2`. L'[esempio anonimo di stato](examples/status.json) mostra i quattro blocchi `sistemico`, `altamente-critico`, `critico`, `non-critico`, mantenendo nomi e tipi del riferimento.
+
+| Quale parametro restituisce | Quale significato ha in Azure |
+|---|---|
+| `id`. | Alias del `sessionId` UUID generato dal client. Non viene generato un timestamp identificativo separato. |
+| `activity`. | `dr-activation`: attivazione della bolla Azure. Il valore GCP `act-act` non viene copiato perche non si implementa un servizio applicativo active-active. |
+| `running`. | Stringa `"true"` per una sessione non terminale, `"false"` per SUCCEEDED/FAILED. Non e una verifica di vitalita del processo. |
+| `resource_completed` / `resource_completed_count`. | Elenco delle VM SUCCEEDED e relativo conteggio, mantenuto come stringa. |
+| `resource_pending` / `resource_pending_count`. | VM in coda, in preflight, in lavorazione o non avviate; non vengono contate come completate. |
+| `resource_error` / `resource_error_count`. | Mappa identificativo VM -> messaggio di errore, con conteggio stringa. |
+| `resource_total`. | Numero totale delle VM di quella classe, come stringa; equivale alla somma completed + pending + error. |
+
+Gli identificativi delle risorse nei blocchi sono `subscription-del-CSV/resource-group/nome-VM`, normalizzati in minuscolo. Questa chiave rimane stabile prima e dopo la risoluzione delle subscription e distingue VM omonime. Non e un resource ID ARM: gli identificativi subscription Azure risolti restano nei risultati dettagliati.
+
+`results` conserva nome VM, subscription/gruppo, errore e stato Azure e aggiunge `criticita`, `acronimo`, `priorityClass`, `priority`, `csvRow`, `activationOrder`, `resourceKey`, `startedAt` e `completedAt`. Le date indicano il tentativo di gestione risorse, non la disponibilita dell'applicazione.
+
+Lo stesso report per classi e contenuto nel JSON persistente `sessions/<sessionId>/state.json`, aggiornato con scritture condizionali. Non esiste un secondo file riepilogativo indipendente che potrebbe divergere dall'API. I log testuali degli stage Azure restano nel container log e riportano anche sessione, criticita e acronimo.
+
+Le sessioni storiche con `schemaVersion=1` rimangono consultabili nel precedente formato Azure: il codice non inventa criticita o acronimi mancanti. Le nuove richieste richiedono sempre le cinque colonne.
 
 | Quale risposta HTTP puo ricevere il client | Quale condizione indica |
 |---|---|
@@ -184,7 +223,7 @@ La postazione deve risolvere Function, relativo nome `scm` per la pubblicazione 
 La configurazione usa solo il provider Terraform AzureRM. Gli input esistenti hanno tipi e descrizioni in [variables.tf](terraform/variables.tf); il cliente fornisce valori ambientali senza modificare blocchi risorsa.
 
 ```powershell
-git clone --branch feature/async-session-id --single-branch https://github.com/lupass93/attivazione-dr-bolla.git
+git clone --branch feature/async-session-id-csv-log --single-branch https://github.com/lupass93/attivazione-dr-bolla.git
 Set-Location attivazione-dr-bolla
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
@@ -264,6 +303,9 @@ I tre script live sono separati dai test locali per non avviare accidentalmente 
 | REQ-ASYNC-003: rispondere dopo conferma della coda, senza eseguire la replica nello starter. | Mancata conferma produce 503; starter senza chiamate al core e con messaggio registrato prima del 202. |
 | REQ-ASYNC-004: controllare soltanto i prerequisiti necessari, prima delle creazioni. | ASG/VNet/subnet/LB/pool/gruppi mancanti bloccano; configurazioni esterne non riconciliate; una riga fallita impedisce tutte le creazioni. |
 | REQ-ASYNC-005: leggere lo stato della sessione richiesta. | Nessun recupero di successi precedenti, omonimi distinti e CSV modificato senza effetti retroattivi. |
+| REQ-CSVLOG-001: usare le due colonne cliente prima delle tre Azure. | Nove etichette accettate, metadati obbligatori, layout e duplicati validati prima dell'accodamento. |
+| REQ-CSVLOG-002: rispettare le quattro priorita. | Ordine reale delle chiamate al core, stabilita delle parita, errori e piano immutabile. |
+| REQ-CSVLOG-003: allineare JSON e log senza perdere il contesto Azure. | Nomi/tipi dei blocchi cliente, contatori coerenti, VM omonime, acronimo nei risultati e nei log, stato persistente uguale alla proiezione pubblica. |
 | CON-ASYNC-001: vietare fallback dati pubblico. | Terraform configura Private Endpoint/identita; il codice rifiuta risoluzioni non private e connessioni non HTTPS. Il collaudo Azure deve verificarne il percorso effettivo. |
 
 ### Quale collaudo reale e stato completato il 20 ottobre 2026

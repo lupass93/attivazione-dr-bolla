@@ -8,6 +8,7 @@
 *.csv
 !examples/vms.csv
 !examples/vms-multisubscription.csv
+!examples/vms-priorities.csv
 local.settings.json
 function-app/Modules/Az.*/
 out/

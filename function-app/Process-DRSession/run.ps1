@@ -40,7 +40,7 @@ try {
         if (-not $state.acceptedAt) { $state.acceptedAt = [datetime]::UtcNow.ToString('o') }
         $state.startedAt = [datetime]::UtcNow.ToString('o')
         $state.updatedAt = $state.startedAt
-        if (Write-DRDocument $client "sessions/$sessionId/state.json" $state -ETag $record.ETag) {
+        if (Write-DRSessionState $client $sessionId $state -ETag $record.ETag) {
             $claimed = $true
             break
         }
@@ -61,6 +61,10 @@ try {
 
     for ($index = 0; $index -lt $manifest.rows.Count; $index++) {
         $row = $manifest.rows[$index]
+        if ($manifest.schemaVersion -ge 2) {
+            $arguments.Criticita = $row.Criticita
+            $arguments.Acronimo = $row.Acronimo
+        }
         $results[$index].status = 'PREFLIGHT'
         Update-DRSessionState $client $sessionId -OwnerMessageId $messageId -Changes @{ results = $results } | Out-Null
         $check = Invoke-VMReplication @arguments -SourceSubscription $row.SourceSubscription `
@@ -93,12 +97,18 @@ try {
     Update-DRSessionState $client $sessionId -OwnerMessageId $messageId -Changes @{ status = 'RUNNING'; phase = 'Replication' } | Out-Null
     for ($index = 0; $index -lt $manifest.rows.Count; $index++) {
         $row = $manifest.rows[$index]
+        if ($manifest.schemaVersion -ge 2) {
+            $arguments.Criticita = $row.Criticita
+            $arguments.Acronimo = $row.Acronimo
+            $results[$index].startedAt = [datetime]::UtcNow.ToString('o')
+        }
         $results[$index].status = 'RUNNING'
         Update-DRSessionState $client $sessionId -OwnerMessageId $messageId -Changes @{ results = $results } | Out-Null
         $result = Invoke-VMReplication @arguments -SourceSubscription $row.SourceSubscription `
             -SourceResourceGroup $row.SourceResourceGroup -SourceVmName $row.SourceVmName
         $results[$index].status = if ($result.Status -eq 'Succeeded') { 'SUCCEEDED' } else { 'FAILED' }
         $results[$index].error = $result.Error
+        if ($manifest.schemaVersion -ge 2) { $results[$index].completedAt = [datetime]::UtcNow.ToString('o') }
         Update-DRSessionState $client $sessionId -OwnerMessageId $messageId -Changes @{ results = $results } | Out-Null
     }
     $failed = @($results | Where-Object status -eq 'FAILED').Count -gt 0

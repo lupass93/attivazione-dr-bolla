@@ -87,8 +87,11 @@ function script:Invoke-VMReplication {
     param($SourceSubscription, $SourceResourceGroup, $SourceVmName, $SessionId, [switch]$PreflightOnly,
         $BackendPoolNameOverride, $LogContainerName, $LogStorageAccountName, $TargetSubscriptionSuffix,
         $TargetResourceGroupSuffix, $TargetVnetNameSuffix, $TargetVnetRgSuffix, $TargetLbNameSuffix,
-        $TargetLbRgSuffix, $TargetDesNameSuffix, $TargetDesRgSuffix, $TargetAsgNameSuffix)
-    $global:CoreCalls.Add(@{ vm = $SourceVmName; preflight = [bool]$PreflightOnly; sessionId = $SessionId })
+        $TargetLbRgSuffix, $TargetDesNameSuffix, $TargetDesRgSuffix, $TargetAsgNameSuffix, $Criticita, $Acronimo)
+    $global:CoreCalls.Add(@{
+        vm = $SourceVmName; preflight = [bool]$PreflightOnly; sessionId = $SessionId
+        criticita = $Criticita; acronimo = $Acronimo
+    })
     $failure = if ($PreflightOnly) { $SourceVmName -in $global:PreflightFailures } else { $SourceVmName -in $global:ReplicationFailures }
     return [pscustomobject]@{
         SourceSubscriptionId = $SourceSubscription

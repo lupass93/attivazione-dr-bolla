@@ -1,7 +1,7 @@
 . (Join-Path $PSScriptRoot 'SessionTestSupport.ps1')
 $idA = '55555555-5555-4555-8555-555555555555'
 $idB = '66666666-6666-4666-8666-666666666666'
-Set-TestCsv "SourceSubscription,SourceResourceGroup,SourceVmName`nsource-a,rg-web,vm-same`nsource-b,rg-web,vm-same"
+Set-TestCsv "Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName`nSistemico (2h),APP01,source-a,rg-web,vm-same`nSistemico (2h),APP02,source-b,rg-web,vm-same"
 foreach ($id in @($idA, $idB)) { Invoke-TestSubmission @{ sessionId = $id; csvBlobPath = 'vms.csv' } | Out-Null }
 Update-DRSessionState $global:TestClient $idA -Changes @{ status = 'SUCCEEDED' } | Out-Null
 $statusScript = Join-Path $script:Root 'function-app/Get-DRStatus/run.ps1'

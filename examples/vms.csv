@@ -1,2 +1,2 @@
-SourceSubscription,SourceResourceGroup,SourceVmName
-00000000-0000-0000-0000-000000000000,primary-workload-rg,example-vm-01
+Criticita,Acronimo,SourceSubscription,SourceResourceGroup,SourceVmName
+Sistemico (2h),APP01,00000000-0000-0000-0000-000000000000,primary-workload-rg,example-vm-01

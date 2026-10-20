@@ -21,6 +21,7 @@ $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new
 $script:SourceContext = $null
 $script:TargetContext = $null
 $script:LogStorageContext = $null
+$script:LogMetadata = $null
 
 function Write-Log {
     param(
@@ -30,6 +31,11 @@ function Write-Log {
     )
     $ts     = Get-Date -Format 'yyyy-MM-ddTHH:mm:ss.fffK'
     $prefix = if ($VmName) { "[$VmName] " } else { '' }
+    if ($null -ne $script:LogMetadata) {
+        $prefix += "[sessionId=$($script:LogMetadata.SessionId)] "
+        if ($script:LogMetadata.Criticita) { $prefix += "[Criticita=$($script:LogMetadata.Criticita)] " }
+        if ($script:LogMetadata.Acronimo) { $prefix += "[Acronimo=$($script:LogMetadata.Acronimo)] " }
+    }
     $line   = "$ts [$Level] ${prefix}$Message"
     Write-Host $line
     [void]$script:LogBuffer.Enqueue($line)
@@ -396,6 +402,8 @@ function Invoke-VMReplication {
         [Parameter(Mandatory = $false)] [string]   $LogStorageAccountName           = '',
         [Parameter(Mandatory = $false)] [string]   $LogContainerName                = '',
         [Parameter(Mandatory = $true)]  [guid]     $SessionId,
+        [string]$Criticita = '',
+        [string]$Acronimo = '',
         [switch]$PreflightOnly
     )
 
@@ -411,6 +419,7 @@ function Invoke-VMReplication {
     $effAsgNameSuffix  = $TargetAsgNameSuffix
 
     $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $script:LogMetadata = @{ SessionId = $SessionId.ToString('D'); Criticita = $Criticita; Acronimo = $Acronimo }
     $summary = [ordered]@{
         SnapshotsCreated         = [System.Collections.Generic.List[string]]::new()
         SnapshotsReused          = [System.Collections.Generic.List[string]]::new()
