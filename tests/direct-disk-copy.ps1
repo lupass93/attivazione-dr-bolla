@@ -44,7 +44,12 @@ function Invoke-CopyCase {
         param($CopyCode, $Case)
         function Write-Log { param($Message, $Level, $VmName) }
         function Upload-StageLog {
-            param($VmName, $StageId, $StageDescription, $Failed, $LogStorageAccountName, $LogContainerName, $InvocationId)
+            param($VmName, $StageId, $StageDescription, $Failed, $LogStorageAccountName, $LogContainerName, $SessionId)
+        }
+        function Get-DRPrerequisites {
+            param($VmName, $VmResourceGroup, $VnetResourceGroup, $VnetName, $SubnetName, $AsgNames,
+                $DesResourceGroup, $LoadBalancerName, $LoadBalancerResourceGroup, $SourcePoolNames, $PoolNameOverride, $DefaultProfile)
+            @{ Subnet = $null; AsgIds = @() }
         }
         function Set-SubscriptionContext { param($SubscriptionId, $FriendlyName) }
         function Get-AzContext { $script:TargetContext }
@@ -145,7 +150,17 @@ function Invoke-CopyCase {
         }
         $LogStorageAccountName = ''
         $LogContainerName = ''
-        $InvocationId = 'test'
+        $SessionId = '00000000-0000-0000-0000-000000000099'
+        $PreflightOnly = $false
+        $srcAsgIds = @()
+        $srcBackendPoolNames = @()
+        $targetVmRg = 'rg-dr'
+        $targetVnetRg = 'rg-network-dr'
+        $targetVnetName = 'vnet-dr'
+        $targetSubnetName = 'workload'
+        $targetLbName = $null
+        $targetLbRg = 'rg-dr'
+        $BackendPoolNameOverride = ''
         $targetDisksByName = @{}
         $failure = $null
         try { . $CopyCode }

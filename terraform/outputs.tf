@@ -38,6 +38,18 @@ output "log_container_name" {
   value = azurerm_storage_container.application["dr-logs"].name
 }
 
+output "session_container_name" {
+  value = azurerm_storage_container.application["dr-sessions"].name
+}
+
+output "activation_queue_name" {
+  value = azurerm_storage_queue.activation.name
+}
+
+output "poison_queue_name" {
+  value = azurerm_storage_queue.poison.name
+}
+
 output "source_identity_client_id" {
   value = data.azurerm_user_assigned_identity.source.client_id
 }

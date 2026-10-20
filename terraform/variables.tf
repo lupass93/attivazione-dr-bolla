@@ -151,6 +151,8 @@ variable "resource_names" {
       "deployment_container",
       "csv_container",
       "log_container",
+      "session_container",
+      "activation_queue",
       "function_private_endpoint",
       "function_private_dns_zone",
       "function_private_dns_link",
@@ -189,7 +191,7 @@ variable "resource_names" {
 
   validation {
     condition = alltrue([
-      for key, fallback in { deployment_container = "app-package", csv_container = "dr-configs", log_container = "dr-logs" } :
+      for key, fallback in { deployment_container = "app-package", csv_container = "dr-configs", log_container = "dr-logs", session_container = "dr-sessions" } :
       try(length(lookup(var.resource_names, key, fallback)) >= 3 && length(lookup(var.resource_names, key, fallback)) <= 63 &&
         can(regex("^[a-z0-9][a-z0-9-]*[a-z0-9]$", lookup(var.resource_names, key, fallback))) &&
       !strcontains(lookup(var.resource_names, key, fallback), "--"), false)
@@ -201,9 +203,19 @@ variable "resource_names" {
     condition = length(toset([
       lookup(var.resource_names, "deployment_container", "app-package"),
       lookup(var.resource_names, "csv_container", "dr-configs"),
-      lookup(var.resource_names, "log_container", "dr-logs")
-    ])) == 3
-    error_message = "Deployment, CSV and log containers must have distinct names."
+      lookup(var.resource_names, "log_container", "dr-logs"),
+      lookup(var.resource_names, "session_container", "dr-sessions")
+    ])) == 4
+    error_message = "Deployment, CSV, log and session containers must have distinct names."
+  }
+
+  validation {
+    condition = try(
+      length(lookup(var.resource_names, "activation_queue", "dr-activation")) >= 3 &&
+      length(lookup(var.resource_names, "activation_queue", "dr-activation")) <= 56 &&
+      can(regex("^[a-z0-9][a-z0-9-]*[a-z0-9]$", lookup(var.resource_names, "activation_queue", "dr-activation"))) &&
+    !strcontains(lookup(var.resource_names, "activation_queue", "dr-activation"), "--"), false)
+    error_message = "The activation queue name must have 3-56 lowercase letters, digits or nonconsecutive hyphens, leaving room for the -poison suffix."
   }
 
   validation {

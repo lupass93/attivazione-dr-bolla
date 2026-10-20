@@ -21,6 +21,13 @@ data "azurerm_resource_group" "hosting" {
 data "azurerm_storage_account" "hosting" {
   name                = var.storage_account_name
   resource_group_name = coalesce(var.storage_resource_group_name, var.resource_group_name)
+
+  lifecycle {
+    postcondition {
+      condition     = self.public_network_access == "Disabled"
+      error_message = "The existing Storage Account must disable public network access. Public fallback is forbidden."
+    }
+  }
 }
 
 data "azurerm_user_assigned_identity" "source" {
@@ -100,10 +107,21 @@ resource "azurerm_storage_container" "application" {
     "app-package" = lookup(var.resource_names, "deployment_container", "app-package")
     "dr-configs"  = lookup(var.resource_names, "csv_container", "dr-configs")
     "dr-logs"     = lookup(var.resource_names, "log_container", "dr-logs")
+    "dr-sessions" = lookup(var.resource_names, "session_container", "dr-sessions")
   }
   name                  = each.value
   storage_account_id    = data.azurerm_storage_account.hosting.id
   container_access_type = "private"
+}
+
+resource "azurerm_storage_queue" "activation" {
+  name               = lookup(var.resource_names, "activation_queue", "dr-activation")
+  storage_account_id = data.azurerm_storage_account.hosting.id
+}
+
+resource "azurerm_storage_queue" "poison" {
+  name               = "${azurerm_storage_queue.activation.name}-poison"
+  storage_account_id = data.azurerm_storage_account.hosting.id
 }
 
 resource "azurerm_log_analytics_workspace" "hosting" {
@@ -176,6 +194,11 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     CSV_STORAGE_CONNECTION__blobServiceUri    = data.azurerm_storage_account.hosting.primary_blob_endpoint
     CSV_CONTAINER_NAME                        = azurerm_storage_container.application["dr-configs"].name
     LOG_CONTAINER_NAME                        = azurerm_storage_container.application["dr-logs"].name
+    SESSION_CONTAINER_NAME                    = azurerm_storage_container.application["dr-sessions"].name
+    DR_QUEUE_NAME                             = azurerm_storage_queue.activation.name
+    DR_QUEUE_CONNECTION__queueServiceUri      = data.azurerm_storage_account.hosting.primary_queue_endpoint
+    DR_QUEUE_CONNECTION__credential           = "managedidentity"
+    DR_QUEUE_CONNECTION__clientId             = data.azurerm_user_assigned_identity.source.client_id
     VM_PARALLEL_THROTTLE                      = "1"
     PARALLEL_THROTTLE                         = "1"
     PSWorkerInProcConcurrencyUpperBound       = "1"

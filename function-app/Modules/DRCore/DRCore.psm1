@@ -7,7 +7,7 @@
 #   - All target resource names are derived by appending $TargetNameSuffix (default: '-DR')
 #     to source names discovered at runtime (VNet, DES, LB RG, resource group, subscription).
 #   - Returns a structured result object instead of writing to a local JSON file.
-#   - Designed to be called from ForEach-Object -Parallel in run.ps1.
+#   - Called sequentially by the session queue worker.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -214,7 +214,7 @@ function Upload-StageLog {
         [bool]$Failed,
         [string]$LogStorageAccountName,
         [string]$LogContainerName,
-        [string]$InvocationId
+        [string]$SessionId
     )
     if ([string]::IsNullOrWhiteSpace($LogStorageAccountName) -or [string]::IsNullOrWhiteSpace($LogContainerName) -or
         [string]::IsNullOrWhiteSpace($script:LogPrefix)) {
@@ -230,7 +230,7 @@ function Upload-StageLog {
         $logContent = $logEntries -join "`n"
         $timestamp  = Get-Date -Format 'yyyyMMdd-HHmm'
         $failSuffix = if ($Failed) { '-failed' } else { '' }
-        $logBlobName = "$($script:LogPrefix)$InvocationId-stage$StageId-$StageDescription-$timestamp$failSuffix.log"
+        $logBlobName = "$($script:LogPrefix)$SessionId-stage$StageId-$StageDescription-$timestamp$failSuffix.log"
         $tmpLog = [System.IO.Path]::GetTempFileName()
         try {
             [System.IO.File]::WriteAllText($tmpLog, $logContent, [System.Text.Encoding]::UTF8)
@@ -281,9 +281,55 @@ function Select-BackendPool {
     throw "Cannot auto-select a backend pool from '$($LoadBalancer.Name)'. Available: $($pools.Name -join ', '). Set BACKEND_POOL_NAME_OVERRIDE env var."
 }
 
-# ---------------------------------------------------------------------------
-# Public function
-# ---------------------------------------------------------------------------
+function Get-DRPrerequisites {
+    param(
+        [string]$VmName, [string]$VmResourceGroup, [string]$VnetResourceGroup,
+        [string]$VnetName, [string]$SubnetName, [string[]]$AsgNames,
+        [string]$DesResourceGroup, [string]$LoadBalancerName, [string]$LoadBalancerResourceGroup,
+        [string[]]$SourcePoolNames, [string]$PoolNameOverride, [object]$DefaultProfile
+    )
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $groups = @($VmResourceGroup, $VnetResourceGroup, $DesResourceGroup)
+    if ($LoadBalancerName) { $groups += $LoadBalancerResourceGroup }
+    foreach ($group in @($groups | Sort-Object -Unique)) {
+        try {
+            $resourceGroup = Get-AzResourceGroup -Name $group -DefaultProfile $DefaultProfile -ErrorAction Stop
+            if ($null -eq $resourceGroup) { throw "Resource Group '$group' was not returned." }
+        }
+        catch { $errors.Add("Resource Group '$group': $($_.Exception.Message)") }
+    }
+    $subnet = $null
+    try {
+        $vnet = Get-AzVirtualNetwork -ResourceGroupName $VnetResourceGroup -Name $VnetName -DefaultProfile $DefaultProfile -ErrorAction Stop
+        if ($null -eq $vnet) { throw "VNet '$VnetName' was not returned." }
+        $subnet = $vnet.Subnets | Where-Object Name -eq $SubnetName | Select-Object -First 1
+        if ($null -eq $subnet) { throw "Subnet '$SubnetName' is missing." }
+    }
+    catch { $errors.Add("VNet '$VnetName' / subnet '$SubnetName': $($_.Exception.Message)") }
+    $asgIds = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $AsgNames) {
+        try {
+            $asg = Get-AzApplicationSecurityGroup -ResourceGroupName $VnetResourceGroup -Name $name -DefaultProfile $DefaultProfile -ErrorAction Stop
+            if ($null -eq $asg) { throw "ASG '$name' was not returned." }
+            $asgIds.Add([string]$asg.Id)
+        }
+        catch { $errors.Add("ASG '$name': $($_.Exception.Message)") }
+    }
+    if ($LoadBalancerName) {
+        try {
+            $loadBalancer = Get-AzLoadBalancer -ResourceGroupName $LoadBalancerResourceGroup -Name $LoadBalancerName -DefaultProfile $DefaultProfile -ErrorAction Stop
+            if ($null -eq $loadBalancer) { throw "Load Balancer '$LoadBalancerName' was not returned." }
+            Select-BackendPool -LoadBalancer $loadBalancer -SourcePoolNames $SourcePoolNames -PoolNameOverride $PoolNameOverride | Out-Null
+        }
+        catch { $errors.Add("Load Balancer '$LoadBalancerName' / backend pool: $($_.Exception.Message)") }
+    }
+    if ($errors.Count -gt 0) {
+        foreach ($errorMessage in $errors) { Write-Log $errorMessage 'ERROR' -VmName $VmName }
+        throw "DR prerequisites are missing or inaccessible: $($errors -join ' | ')"
+    }
+    Write-Log 'DR prerequisite existence checks passed; network rules and external configuration are not reconciled.' -VmName $VmName
+    return @{ Subnet = $subnet; AsgIds = @($asgIds) }
+}
 
 function Invoke-VMReplication {
     <#
@@ -324,7 +370,7 @@ function Invoke-VMReplication {
     .PARAMETER TargetAsgNameSuffix
         Suffix for target Application Security Group names. Empty = no suffix.
         ASGs are resolved in the target VNet resource group and must be pre-created.
-        If an ASG is not found, a warning is logged and the NIC is created without it.
+        Missing required ASGs fail the preflight before workload creation.
     .OUTPUTS
         PSCustomObject with SourceVmName, TargetVmName, Status ('Succeeded'|'Failed'),
         Error, LogEntries, and Summary hashtable.
@@ -349,7 +395,8 @@ function Invoke-VMReplication {
         [Parameter(Mandatory = $false)] [string]   $TargetAsgNameSuffix             = '',
         [Parameter(Mandatory = $false)] [string]   $LogStorageAccountName           = '',
         [Parameter(Mandatory = $false)] [string]   $LogContainerName                = '',
-        [Parameter(Mandatory = $false)] [string]   $InvocationId                    = ''
+        [Parameter(Mandatory = $true)]  [guid]     $SessionId,
+        [switch]$PreflightOnly
     )
 
     # Use suffix parameters directly (no fallback logic)
@@ -378,6 +425,7 @@ function Invoke-VMReplication {
     }
 
     $result = [ordered]@{
+        SessionId = $SessionId.ToString('D')
         SourceVmName = $SourceVmName
         SourceSubscriptionId = $null
         SourceResourceGroup = $SourceResourceGroup
@@ -539,7 +587,7 @@ function Invoke-VMReplication {
 
         # Upload Stage A log
         Upload-StageLog -VmName $SourceVmName -StageId 'A' -StageDescription 'Discover' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
         # Disks
@@ -657,11 +705,25 @@ function Invoke-VMReplication {
             }
         }
         Write-Log 'Stage B complete. Direct copy validated; no snapshots are created or reused.' -VmName $SourceVmName
+        $requiredAsgNames = @($srcAsgIds | ForEach-Object {
+            "$(Get-LastNameFromId -ResourceId $_)$effAsgNameSuffix"
+        })
+        $prerequisites = Get-DRPrerequisites -VmName $SourceVmName -VmResourceGroup $targetVmRg `
+            -VnetResourceGroup $targetVnetRg -VnetName $targetVnetName -SubnetName $targetSubnetName `
+            -AsgNames $requiredAsgNames -DesResourceGroup $targetDesRg `
+            -LoadBalancerName $targetLbName -LoadBalancerResourceGroup $targetLbRg `
+            -SourcePoolNames $srcBackendPoolNames -PoolNameOverride $BackendPoolNameOverride `
+            -DefaultProfile $script:TargetContext
 
         # Upload Stage B log
         Upload-StageLog -VmName $SourceVmName -StageId 'B' -StageDescription 'DiskCopyValidation' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        if ($PreflightOnly) {
+            $result.Status = 'Succeeded'
+            $result.LogEntries = @($script:LogBuffer)
+            return [pscustomobject]$result
+        }
 
         # Stage C: Create managed disks directly from source managed disks
         $currentStage = 'C'
@@ -728,7 +790,7 @@ function Invoke-VMReplication {
 
         # Upload Stage C log
         Upload-StageLog -VmName $SourceVmName -StageId 'C' -StageDescription 'Disks' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
         # ── Stage D: Create target NIC + VM ─────────────────────────────────────
@@ -755,13 +817,7 @@ function Invoke-VMReplication {
             throw "Context mismatch before VNet lookup! Expected: $($targetSub.Id), Current: $($currentCtx.Subscription.Id)"
         }
 
-        $targetVnet = Invoke-WithRetry -Operation "Get-AzVirtualNetwork $targetVnetName" -ScriptBlock {
-            Get-AzVirtualNetwork -ResourceGroupName $targetVnetRg -Name $targetVnetName -DefaultProfile $script:TargetContext -ErrorAction Stop
-        }
-        $targetSubnet = $targetVnet.Subnets | Where-Object { $_.Name -eq $targetSubnetName } | Select-Object -First 1
-        if ($null -eq $targetSubnet) {
-            throw "Subnet '$targetSubnetName' not found in VNet '$targetVnetName'. Available: $($targetVnet.Subnets.Name -join ', ')."
-        }
+        $targetSubnet = $prerequisites.Subnet
 
         # Log the subnet ID to verify it contains correct subscription
         Write-Log "Target subnet ID: $($targetSubnet.Id)" -VmName $SourceVmName
@@ -781,25 +837,7 @@ function Invoke-VMReplication {
             throw "Context mismatch before ASG/NIC operations! Expected: $($targetSub.Id), Current: $($currentCtx.Subscription.Id)"
         }
 
-        # ── Resolve target Application Security Groups (VNet RG, no auto-create) ──
-        $targetAsgIds = @()
-        if ($srcAsgIds.Count -gt 0) {
-            Write-Log "Resolving $($srcAsgIds.Count) target ASG(s) in VNet RG '$targetVnetRg'." -VmName $SourceVmName
-            foreach ($srcAsgId in $srcAsgIds) {
-                $srcAsgName = Get-LastNameFromId -ResourceId $srcAsgId
-                $tAsgName   = "${srcAsgName}${effAsgNameSuffix}"
-                $tAsgRg     = $targetVnetRg
-                # Re-verify context before Get-AzApplicationSecurityGroup to prevent context drift
-                Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
-                $tAsg = Get-AzApplicationSecurityGroup -ResourceGroupName $tAsgRg -Name $tAsgName -DefaultProfile $script:TargetContext -ErrorAction SilentlyContinue
-                if ($null -eq $tAsg) {
-                    Write-Log "  WARNING: Target ASG '$tAsgName' not found in RG '$tAsgRg'. ASG must be pre-created. NIC will be created without this ASG binding." 'WARN' -VmName $SourceVmName
-                } else {
-                    Write-Log "  Found target ASG '$tAsgName' in RG '$tAsgRg'. ID: $($tAsg.Id)" -VmName $SourceVmName
-                    $targetAsgIds += [string]$tAsg.Id
-                }
-            }
-        }
+        $targetAsgIds = @($prerequisites.AsgIds)
 
         # NIC - re-verify context before Get to prevent context drift
         Set-SubscriptionContext -SubscriptionId $targetSub.Id -FriendlyName $targetSub.Name
@@ -911,7 +949,7 @@ function Invoke-VMReplication {
 
         # Upload Stage D log
         Upload-StageLog -VmName $SourceVmName -StageId 'D' -StageDescription 'NIC-VM' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
         # ── Stage E: Attach NIC to LB backend pool (skip if source has no LB) ───
@@ -974,7 +1012,7 @@ function Invoke-VMReplication {
 
         # Upload Stage E log
         Upload-StageLog -VmName $SourceVmName -StageId 'E' -StageDescription 'LB-Attach' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
         $script:LogBuffer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
         # ── Completed ────────────────────────────────────────────────────────────
@@ -982,7 +1020,7 @@ function Invoke-VMReplication {
 
         # Upload completion marker log
         Upload-StageLog -VmName $SourceVmName -StageId 'Completed' -StageDescription 'Success' -Failed $false `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
 
         $result.Status  = 'Succeeded'
         $result.Summary = [ordered]@{
@@ -1009,7 +1047,7 @@ function Invoke-VMReplication {
 
         # Upload failed stage log
         Upload-StageLog -VmName $SourceVmName -StageId $currentStage -StageDescription 'Failed' -Failed $true `
-            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -InvocationId $InvocationId
+            -LogStorageAccountName $LogStorageAccountName -LogContainerName $LogContainerName -SessionId $SessionId
     }
 
     return [pscustomobject]$result

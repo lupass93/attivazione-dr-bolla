@@ -33,8 +33,8 @@ az functionapp deployment source config-zip "${target[@]}" --src "$package_path"
     fail 'Deployment failed. Inspect the Azure error before retrying.'
 
 functions=$(az functionapp function list "${target[@]}" --query '[].name' -o json --only-show-errors) || fail 'Unable to list indexed functions.'
-jq -e 'any(.[]; endswith("/Invoke-DRReplication")) and any(.[]; endswith("/Get-DRStatus"))' <<< "$functions" >/dev/null ||
-    fail 'Both functions are not yet indexed. Check host startup and storage access.'
+jq -e 'any(.[]; endswith("/Invoke-DRReplication")) and any(.[]; endswith("/Get-DRStatus")) and any(.[]; endswith("/Process-DRSession"))' <<< "$functions" >/dev/null ||
+    fail 'All three functions must be indexed. Check host startup, queue identity and private storage access.'
 
 set +x
 key=$(az functionapp keys list "${target[@]}" --query functionKeys.default -o tsv --only-show-errors) || fail 'Function key unavailable.'
@@ -51,6 +51,6 @@ invoke_code=$(http_code --request POST --header 'Content-Type: application/json'
 status_code=$(http_code "${api%/}/Get-DRStatus") ||
     fail 'Status smoke check failed. Verify private network access and DNS.'
 [[ "$invoke_code" == '400' && "$status_code" == '400' ]] ||
-    fail "Expected HTTP 400 for missing CSV on both endpoints; received $invoke_code/$status_code."
+    fail "Expected HTTP 400 for missing sessionId on both endpoints; received $invoke_code/$status_code."
 
 printf '%s\n' 'Deployment verified. Invoke and Get-DRStatus respond correctly; no replication was started.'

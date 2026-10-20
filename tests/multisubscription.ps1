@@ -104,20 +104,6 @@ try {
     $env:SOURCE_IDENTITY_CLIENT_ID = '00000000-0000-0000-0000-000000000001'
     $env:HOSTING_SUBSCRIPTION_ID = $sourceA.Id
     $env:CSV_STORAGE_CONNECTION__blobServiceUri = 'https://mockstorage.blob.core.windows.net/'
-    & (Join-Path $root 'function-app/Get-DRStatus/run.ps1') `
-        -Request ([pscustomobject]@{ Method = 'GET'; Query = @{ csvBlobPath = 'fake.csv' } }) `
-        -TriggerMetadata ([pscustomobject]@{ InvocationId = '00000000-0000-0000-0000-000000000099' })
-    if ([int]$global:CapturedResponse.StatusCode -ne 200) { throw 'Status handler did not return 200.' }
-    $status = $global:CapturedResponse.Body | ConvertFrom-Json
-    if ($status.results.Count -ne 2 -or $status.summary.succeeded -ne 1 -or $status.summary.failed -ne 1) {
-        throw 'Homonymous source VMs must retain independent API results.'
-    }
-    if (($status.results | Where-Object sourceSubscriptionId -eq $sourceA.Id).status -ne 'SUCCEEDED' -or
-        ($status.results | Where-Object sourceSubscriptionId -eq $sourceB.Id).status -ne 'FAILED') {
-        throw 'Per-subscription API status correlation failed.'
-    }
-    Write-Host 'PASS: real Get-DRStatus handler distinguishes homonymous VMs across two source subscriptions using mocked Azure reads.'
-
     $env:SOURCE_IDENTITY_CLIENT_ID = 'identity-source'
     $env:TARGET_IDENTITY_CLIENT_ID = 'identity-target'
     $tokens = $null

@@ -12,6 +12,7 @@ mock_provider "azurerm" {
       primary_blob_endpoint  = "https://existingstorageaccount.blob.core.windows.net/"
       primary_queue_endpoint = "https://existingstorageaccount.queue.core.windows.net/"
       primary_table_endpoint = "https://existingstorageaccount.table.core.windows.net/"
+      public_network_access  = "Disabled"
     }
   }
 
@@ -68,6 +69,41 @@ variables {
   target_identity_name    = "existing-target-identity"
   function_app_name       = "func-naming-test"
   resource_names          = {}
+}
+
+run "async_storage_and_identity_are_private" {
+  command = plan
+
+  assert {
+    condition = (azurerm_storage_queue.activation.name == "dr-activation" &&
+      azurerm_storage_queue.poison.name == "dr-activation-poison" &&
+      azurerm_storage_container.application["dr-sessions"].name == "dr-sessions" &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["DR_QUEUE_NAME"] == "dr-activation" &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["DR_QUEUE_CONNECTION__queueServiceUri"] == data.azurerm_storage_account.hosting.primary_queue_endpoint &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["DR_QUEUE_CONNECTION__clientId"] == data.azurerm_user_assigned_identity.source.client_id &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["DR_QUEUE_CONNECTION__credential"] == "managedidentity" &&
+    !azurerm_function_app_flex_consumption.hosting.public_network_access_enabled)
+    error_message = "The session queue must use the source identity, private endpoint and persistent session container."
+  }
+}
+
+run "public_storage_is_rejected" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_storage_account.hosting
+    values = { public_network_access = "Enabled" }
+  }
+
+  expect_failures = [data.azurerm_storage_account.hosting]
+}
+
+run "invalid_activation_queue_is_rejected" {
+  command = plan
+  variables {
+    resource_names = { activation_queue = "Invalid--Queue" }
+  }
+  expect_failures = [var.resource_names]
 }
 
 run "default_names_preserve_compatibility" {

@@ -20,8 +20,9 @@ az functionapp deployment source config-zip --subscription $subscription --resou
 if ($LASTEXITCODE -ne 0) { throw 'Deployment failed. Inspect the Azure error before retrying.' }
 
 $functions = az functionapp function list --subscription $subscription --resource-group $resourceGroup --name $name --query '[].name' -o tsv --only-show-errors
-if ($LASTEXITCODE -ne 0 -or -not ($functions -match '/Invoke-DRReplication$') -or -not ($functions -match '/Get-DRStatus$')) {
-    throw 'Both functions are not yet indexed. Check host startup and storage access.'
+if ($LASTEXITCODE -ne 0 -or -not ($functions -match '/Invoke-DRReplication$') -or
+    -not ($functions -match '/Get-DRStatus$') -or -not ($functions -match '/Process-DRSession$')) {
+    throw 'All three functions must be indexed. Check host startup, queue identity and private storage access.'
 }
 $key = az functionapp keys list --subscription $subscription --resource-group $resourceGroup --name $name --query functionKeys.default -o tsv --only-show-errors
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($key)) { throw 'Function key unavailable.' }
@@ -29,7 +30,7 @@ try {
     $headers = @{ 'x-functions-key' = $key }
     $invoke = Invoke-RestMethod -Method Post -Uri "$api/Invoke-DRReplication" -Headers $headers -ContentType 'application/json' -Body '{}' -SkipHttpErrorCheck -StatusCodeVariable invokeCode -TimeoutSec 60
     $status = Invoke-RestMethod -Method Get -Uri "$api/Get-DRStatus" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable statusCode -TimeoutSec 60
-    if ($invokeCode -ne 400 -or $statusCode -ne 400) { throw 'Expected HTTP 400 for missing CSV on both endpoints.' }
+    if ($invokeCode -ne 400 -or $statusCode -ne 400) { throw 'Expected HTTP 400 for missing sessionId on both endpoints.' }
     Write-Host "Deployment verified. Invoke and Get-DRStatus respond correctly; no replication was started."
 } finally {
     Remove-Variable key, headers -ErrorAction SilentlyContinue
