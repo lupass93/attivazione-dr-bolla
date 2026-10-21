@@ -163,6 +163,38 @@ make_module Az.Compute Az.Accounts '[1.0.0,2.0.0)'
 run_case 0 'No PowerShell interpreter' bash "$fixture/scripts/build.sh" --help
 no_azure
 [[ ! -s "$TEST_LOG" ]] || exit 1
+# shellcheck disable=SC2016
+run_case 0 $'PROCEDURE_FAILED=2\nPARENT_STILL_OPEN' bash --noprofile --norc -c '
+    set -euo pipefail
+    if bash "$1" --invalid-option && bash "$2"; then
+        printf "PROCEDURE_OK\n"
+    else
+        printf "PROCEDURE_FAILED=%s\n" "$?"
+    fi
+    printf "PARENT_STILL_OPEN\n"
+' _ "$fixture/scripts/build.sh" "$fixture/scripts/deploy.sh"
+[[ ! -s "$TEST_LOG" ]] || { printf '%s\n' 'A failed build must not start deployment.' >&2; exit 1; }
+# shellcheck disable=SC2016
+run_case 0 $'PROCEDURE_FAILED=2\nPARENT_STILL_OPEN' bash --noprofile --norc -c '
+    set -euo pipefail
+    if bash "$1" --help && bash "$2" --invalid-option; then
+        printf "PROCEDURE_OK\n"
+    else
+        printf "PROCEDURE_FAILED=%s\n" "$?"
+    fi
+    printf "PARENT_STILL_OPEN\n"
+' _ "$fixture/scripts/build.sh" "$fixture/scripts/deploy.sh"
+[[ ! -s "$TEST_LOG" ]] || exit 1
+# shellcheck disable=SC2016
+run_case 0 $'PROCEDURE_OK\nPARENT_STILL_OPEN' bash --noprofile --norc -c '
+    set -euo pipefail
+    if bash "$1" --help && bash "$2" --help; then
+        printf "PROCEDURE_OK\n"
+    else
+        printf "PROCEDURE_FAILED=%s\n" "$?"
+    fi
+    printf "PARENT_STILL_OPEN\n"
+' _ "$fixture/scripts/build.sh" "$fixture/scripts/deploy.sh"
 run_case 2 'unknown build argument' bash "$fixture/scripts/build.sh" --unknown
 run_case 2 'requires a ZIP path' bash "$fixture/scripts/build.sh" --package-path
 run_case 2 'requires a ZIP path' bash "$fixture/scripts/build.sh" --package-path '   '

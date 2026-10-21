@@ -514,14 +514,19 @@ La build usa `-PackagePath` come destinazione del ZIP; il deploy usa lo stesso p
 Installare le utility native e verificare branch, autenticazione, rete e destinazione come descritto nel [README](../README.md#come-eseguire-build-e-deployment-da-bash-senza-powershell). Sullo stesso hosting gia pronto:
 
 ```bash
-set -euo pipefail
-bash ./scripts/build.sh --package-path "./out/function-app.zip"
-bash ./scripts/deploy.sh \
+if bash ./scripts/build.sh --package-path "./out/function-app.zip" &&
+   bash ./scripts/deploy.sh \
     --subscription-id "<ID-SUBSCRIPTION-HOSTING>" \
     --resource-group-name "<RESOURCE-GROUP-HOSTING>" \
     --function-app-name "<NOME-FUNCTION-APP>" \
-    --package-path "./out/function-app.zip"
+    --package-path "./out/function-app.zip"; then
+    printf '%s\n' 'Build e deployment verificati.'
+else
+    printf 'Procedura fallita, exit code %s. Deployment non confermato: leggere gli errori sopra.\n' "$?" >&2
+fi
 ```
+
+Il blocco e per uso interattivo: se la build fallisce, il deploy non parte e il terminale rimane aperto. Non incollare `set -euo pipefail` nella shell chiamante e non avviare gli script con `source`, `.` o `exec`. Se il terminale si e gia chiuso, seguire la [raccolta dell'errore della build](../README.md#come-raccogliere-lerrore-se-la-build-chiude-il-terminale) prima di ritentare il deploy.
 
 La [tabella unica dei parametri PowerShell/Bash](../README.md#come-pubblicare-senza-terraform-con-i-parametri-del-target) documenta funzione, obbligatorieta e default. Per una build senza nuovi download usare `--skip-module-download` soltanto dopo aver predisposto `out/module-cache`; PowerShell usa invece `-SkipModuleDownload` con i suoi moduli locali. I due `--help` Bash mostrano la sintassi senza operazioni Azure.
 

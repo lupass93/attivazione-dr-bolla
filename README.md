@@ -255,17 +255,22 @@ $ErrorActionPreference = 'Stop'
     -PackagePath './out/function-app.zip'
 ```
 
-In Bash, senza PowerShell:
+In Bash, senza PowerShell, usare questo blocco nel terminale interattivo: se la build fallisce, il deploy non parte e la shell rimane aperta.
 
 ```bash
-set -euo pipefail
-bash ./scripts/build.sh --package-path "./out/function-app.zip"
-bash ./scripts/deploy.sh \
+if bash ./scripts/build.sh --package-path "./out/function-app.zip" &&
+   bash ./scripts/deploy.sh \
     --subscription-id "<ID-SUBSCRIPTION-HOSTING>" \
     --resource-group-name "<RESOURCE-GROUP-HOSTING>" \
     --function-app-name "<NOME-FUNCTION-APP>" \
-    --package-path "./out/function-app.zip"
+    --package-path "./out/function-app.zip"; then
+    printf '%s\n' 'Build e deployment verificati.'
+else
+    printf 'Procedura fallita, exit code %s. Deployment non confermato: leggere gli errori sopra.\n' "$?" >&2
+fi
 ```
+
+Non incollare `set -euo pipefail` direttamente nella shell interattiva: `-e` puo chiuderla quando un comando fallisce. Gli script applicano gia questi controlli nel proprio processo. Eseguirli con `bash`, mai con `source`, `.` o `exec`. Nei job automatici invocare gli script direttamente e controllare il loro exit code; il blocco `if` sopra serve a gestire l'errore senza chiudere il terminale.
 
 | Quale parametro usare in PowerShell | Quale parametro usare in Bash | A che cosa serve | Quando e obbligatorio o quale default applica |
 |---|---|---|---|
@@ -331,17 +336,17 @@ Questo comando installa le utility, non Git, Terraform o Azure CLI. Azure CLI de
 **1. Controllare codice e destinazione prima di pubblicare.** Dalla radice del checkout:
 
 ```bash
-set -euo pipefail
-[[ "$(git branch --show-current)" == feature/async-session-id-csv-log ]] || {
-    printf '%s\n' 'Selezionare prima il ramo feature/async-session-id-csv-log.' >&2
-    exit 1
-}
-git pull --ff-only origin feature/async-session-id-csv-log
-terraform -chdir=terraform output -json |
-    jq '{subscription: .hosting_subscription_id.value,
+if [[ "$(git branch --show-current)" == feature/async-session-id-csv-log ]] &&
+   git pull --ff-only origin feature/async-session-id-csv-log &&
+   deployment_outputs=$(terraform -chdir=terraform output -json) &&
+   jq '{subscription: .hosting_subscription_id.value,
          resourceGroup: .resource_group_name.value,
          functionApp: .function_app_name.value,
-         api: .api_url.value}'
+         api: .api_url.value}' <<< "$deployment_outputs"; then
+    printf '%s\n' 'Verificare questi riferimenti prima della pubblicazione.'
+else
+    printf '%s\n' 'Controllo fallito: verificare branch, accesso Git e stato Terraform. Non pubblicare.' >&2
+fi
 ```
 
 Il comando `terraform output` sopra e soltanto il controllo per la modalita precedente. Senza Terraform usare direttamente i tre riferimenti espliciti descritti nella [procedura parametrizzata](#come-pubblicare-senza-terraform-con-i-parametri-del-target); non eseguire quel comando.
@@ -349,8 +354,11 @@ Il comando `terraform output` sopra e soltanto il controllo per la modalita prec
 **2. Generare il pacchetto e poi pubblicarlo.** Questi comandi senza target mantengono la modalita Terraform:
 
 ```bash
-bash ./scripts/build.sh
-bash ./scripts/deploy.sh
+if bash ./scripts/build.sh && bash ./scripts/deploy.sh; then
+    printf '%s\n' 'Build e deployment verificati.'
+else
+    printf 'Procedura fallita, exit code %s. Deployment non confermato: leggere gli errori sopra.\n' "$?" >&2
+fi
 ```
 
 Il significato di ogni parametro e il confronto PowerShell/Bash sono nella [tabella della procedura parametrizzata](#come-pubblicare-senza-terraform-con-i-parametri-del-target). `--help` e `-h` mostrano sintassi, dipendenze e default senza eseguire operazioni.
@@ -358,10 +366,14 @@ Il significato di ogni parametro e il confronto PowerShell/Bash sono nella [tabe
 Esempio con percorsi espliciti, inclusi spazi:
 
 ```bash
-bash ./scripts/build.sh --skip-module-download
-bash ./scripts/deploy.sh \
+if bash ./scripts/build.sh --skip-module-download &&
+   bash ./scripts/deploy.sh \
     --terraform-directory "/percorso/terraform cliente" \
-    --package-path "./out/function-app.zip"
+    --package-path "./out/function-app.zip"; then
+    printf '%s\n' 'Build e deployment verificati.'
+else
+    printf 'Procedura fallita, exit code %s. Deployment non confermato: leggere gli errori sopra.\n' "$?" >&2
+fi
 ```
 
 I percorsi personalizzati relativi sono risolti rispetto alla directory da cui si lancia il comando; i default sono risolti rispetto al repository dello script. Il vecchio uso posizionale `bash ./scripts/deploy.sh DIRECTORY ZIP` resta supportato, ma non va mescolato ai parametri nominati.
@@ -371,6 +383,22 @@ La build legge le versioni esatte da [requirements.psd1](function-app/requiremen
 La build Bash non esegue il parser PowerShell dei sorgenti: la verifica del codice applicativo resta nelle regressioni e nel collaudo del runtime. Questa differenza non introduce un interprete PowerShell nella procedura Bash.
 
 Il deploy seleziona il target dai tre parametri oppure dagli output Terraform, rimuove l'eventuale vecchia impostazione `AzureWebJobsStorage` e pubblica il ZIP; le impostazioni host identity-based devono quindi essere gia corrette. Verifica tre funzioni e due HTTP 400 attesi senza `sessionId`, **senza avviare una replica**. La function key passa a `curl` tramite input standard, non nell'URL o negli argomenti del processo. Un errore interrompe lo script con exit code non zero, cioe un codice che segnala il fallimento al chiamante.
+
+### Come raccogliere l'errore se la build chiude il terminale
+
+Una build avviata con `bash` esce dal proprio processo. La shell chiamante puo pero uscire a sua volta se le e stato applicato `set -e`; usando `source` o `.` lo script viene invece eseguito nella shell stessa e i suoi `exit` possono chiuderla. Questi meccanismi non identificano l'errore che ha fatto fallire la build: serve il suo output.
+
+Aprire un nuovo terminale e, dalla radice del repository, eseguire soltanto questa diagnosi:
+
+```bash
+set +e
+bash ./scripts/build.sh --package-path './out/function-app.zip' > build-client.log 2>&1
+rc=$?
+printf 'Exit code build: %s\n' "$rc"
+tail -n 60 build-client.log
+```
+
+`set +e` disattiva l'uscita automatica del solo terminale chiamante; lo script mantiene i propri controlli e il suo exit code. Il log conserva sia l'output normale sia gli errori. Non eseguire il deploy se il codice e diverso da zero. Verificare il messaggio effettivo prima di installare utility, cambiare proxy/rete o ritentare: una dipendenza mancante e un errore di download richiedono rimedi differenti.
 
 ### Quale verifica reale ha superato la procedura Bash indipendente
 
@@ -583,6 +611,7 @@ La documentazione presuppone prerequisiti e autorizzazioni predisposti dall'orga
 - Build Bash, passo 1: [download manuale dei pacchetti Gallery e dipendenze escluse dal singolo nupkg](https://learn.microsoft.com/powershell/gallery/how-to/working-with-packages/manual-download?view=powershellget-3.x), [intervalli di versione NuGet](https://learn.microsoft.com/nuget/concepts/package-versioning#version-ranges), [implementazione e controlli](scripts/build.sh).
 - Deploy Bash, passo 2: [package deployment Flex Consumption e endpoint privato](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan), [implementazione](scripts/deploy.sh), [test ripetibili](tests/bash-deployment.sh).
 - Target esplicito: [lettura della Function App con Azure CLI](https://learn.microsoft.com/cli/azure/functionapp#az-functionapp-show), [parametri subscription/gruppo/nome/pacchetto del deployment](https://learn.microsoft.com/cli/azure/functionapp/deployment/source#az-functionapp-deployment-source-config-zip), [parameter set PowerShell mutuamente esclusivi](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_parameter_sets?view=powershell-7.6).
+- Terminale Bash: [effetto di `set -e` e gestione dell'errore nelle condizioni `if`](https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html).
 
 ## Glossario della procedura Bash
 
