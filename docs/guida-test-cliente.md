@@ -1,6 +1,6 @@
 # Guida per condurre il test cliente della versione con criticita e acronimo
 
-**Preparata per il 21 ottobre 2026.** La guida descrive `feature/async-session-id-csv-log` e la versione applicativa verificata il 20 ottobre, non il vecchio ramo asincrono senza colonne cliente. I successivi aggiornamenti della sola documentazione non richiedono un nuovo deployment.
+**Aggiornata il 17 novembre 2026.** La guida descrive `feature/multiple-lb_logging-actions-and-info-check-rg`: mantiene CSV e report cliente e aggiunge piu Load Balancer, gruppi di networking distinti e cronologia delle operazioni. I collaudi storici del 20 ottobre restano identificati come tali. Le nuove funzionalita richiedono il pacchetto aggiornato; una modifica della sola documentazione non richiede deployment.
 
 **Percorso consigliato:** usare una Function gia distribuita e verificata. Non eseguire Terraform o ripubblicare il codice durante la dimostrazione se l'ambiente e gia pronto. La sezione finale sul deployment serve soltanto per una prima installazione o un aggiornamento autorizzato.
 
@@ -43,7 +43,7 @@ Un Private Endpoint collega un servizio a un indirizzo privato della rete Azure.
 | Operatore che verifica le risorse. | Lettura dei gruppi/subscription sorgenti e DR. I ruoli delle identita della Function non vengono automaticamente attribuiti alla persona. |
 | UAMI sorgente/storage. | Una User-Assigned Managed Identity (UAMI) e un'identita Azure gestita senza password. Questa identita legge il primario e ha Storage Blob Data Owner, Storage Queue Data Contributor e Storage Table Data Contributor sullo storage; invia telemetria con Monitoring Metrics Publisher. |
 | UAMI DR. | Contributor sui gruppi workload DR, permessi di rete/cifratura necessari e Disk Backup Reader sui dischi/gruppi primari. Il solo Reader dell'altra identita non basta alla copia. |
-| Prerequisiti DR. | Gruppi, rete/subnet, Application Security Group (ASG), che raggruppano le NIC per le regole di sicurezza, e Disk Encryption Set (DES), che seleziona la chiave dei dischi, esistenti. Load Balancer/backend pool esistenti quando il primario li usa. |
+| Prerequisiti DR. | Gruppi distinti di VM, NIC e networking; rete/subnet, Application Security Group (ASG), che raggruppano le NIC, Network Security Group (NSG), che filtra il traffico, e Disk Encryption Set (DES), che seleziona la chiave dei dischi, esistenti. Devono esistere tutti i Load Balancer e i backend pool richiesti dalle configurazioni IP della NIC primaria. |
 | Cifratura e regione. | Chiave e identita DES autorizzate; source e target nello stesso tenant Microsoft Entra e dischi nella stessa regione. La copia diretta non realizza DR geografico. |
 
 Per upload bastano i permessi dati necessari sul container CSV; per leggere log/sessioni servono i relativi permessi dati di lettura. Il ruolo Contributor sulla Function non concede automaticamente accesso ai contenuti Blob. Non assegnare ruoli piu ampi soltanto per velocizzare il test: seguire la [matrice completa](../README.md#quali-autorizzazioni-e-prerequisiti-verificare).
@@ -57,7 +57,7 @@ Usare una directory nuova, senza sovrascrivere un checkout esistente:
 Il repository e privato: l'account GitHub del cliente deve avere accesso ed essere autenticato nel client Git secondo la procedura aziendale. `az login` autentica Azure, non GitHub. Non inserire token nell'URL e non copiare credenziali sulla postazione di test; in alternativa il responsabile consegna codice/pacchetto verificati con un canale approvato.
 
 ```powershell
-git clone --branch feature/async-session-id-csv-log --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-test-cliente
+git clone --branch feature/multiple-lb_logging-actions-and-info-check-rg --single-branch https://github.com/lupass93/attivazione-dr-bolla.git attivazione-dr-bolla-test-cliente
 if ($LASTEXITCODE -ne 0) { throw 'Clone non riuscito.' }
 Set-Location attivazione-dr-bolla-test-cliente
 git branch --show-current
@@ -66,9 +66,9 @@ $PSVersionTable.PSVersion
 $ErrorActionPreference = 'Stop'
 ```
 
-**Atteso:** ramo `feature/async-session-id-csv-log` e PowerShell 7.6. Registrare la versione effettivamente usata. Eseguire i passi successivi **nella stessa finestra PowerShell**, cosi le variabili restano disponibili.
+**Atteso:** ramo `feature/multiple-lb_logging-actions-and-info-check-rg` e PowerShell 7.6. Registrare la versione effettivamente usata. Eseguire i passi successivi **nella stessa finestra PowerShell**, cosi le variabili restano disponibili.
 
-Il nome `feature/async-session-id/csv-log` non puo coesistere in Git con il ramo padre; il nome sopra e quello realmente pubblicato.
+Il ramo CSV/log precedente resta una consegna storica; per queste integrazioni usare il ramo indicato sopra, senza merge in delivery.
 
 ## Passo 2. Selezionare il tenant e la Function concordati
 
@@ -107,7 +107,7 @@ if ($Site.properties.publicNetworkAccess -ne 'Disabled') {
     throw 'La Function non risulta configurata con accesso pubblico disabilitato.'
 }
 $ApiUrl = "https://$($Site.properties.defaultHostName)/api"
-$SettingQuery = "[?name=='CSV_STORAGE_CONNECTION__blobServiceUri' || name=='CSV_CONTAINER_NAME' || name=='LOG_CONTAINER_NAME' || name=='SESSION_CONTAINER_NAME' || name=='DR_QUEUE_NAME' || name=='DR_QUEUE_CONNECTION__queueServiceUri']"
+$SettingQuery = "[?name=='CSV_STORAGE_CONNECTION__blobServiceUri' || name=='CSV_CONTAINER_NAME' || name=='LOG_CONTAINER_NAME' || name=='SESSION_CONTAINER_NAME' || name=='DR_QUEUE_NAME' || name=='DR_QUEUE_CONNECTION__queueServiceUri' || name=='DR_STORAGE_RESOURCE_ID']"
 $Settings = az functionapp config appsettings list --subscription $HostingSubscription `
     --resource-group $HostingResourceGroup --name $FunctionName --query $SettingQuery -o json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Impossibile leggere le impostazioni operative.' }
@@ -132,6 +132,8 @@ $QueueName = $Map['DR_QUEUE_NAME']
 ```
 
 **Atteso:** parametri dell'ambiente concordato. Questa operazione richiede permessi di gestione per leggere configurazione e chiavi; se il cliente non li ha, il responsabile fornisce questi valori e la key tramite il canale approvato. Non mostrare o esportare l'intero elenco delle impostazioni.
+
+`DR_STORAGE_RESOURCE_ID` deve indicare l'identificativo completo dello Storage Account per includerne il vero Resource Group nella cronologia Data Plane. Terraform lo configura automaticamente; negli altri ambienti lo imposta il responsabile. L'assenza non viene sostituita da un gruppo presunto.
 
 Se si dispone gia dello stato Terraform corretto, gli stessi riferimenti sono negli output di `terraform -chdir=terraform output -json`. Un clone nuovo non contiene quello stato: il solo clone non rende disponibili gli output.
 
@@ -375,6 +377,17 @@ if ($null -ne $Vm) {
 
 **Atteso:** richiesta congelata nell'ordine di attivazione; stato persistente con gli stessi blocchi cliente; log con `sessionId`, `Criticita` e `Acronimo`. Se il preflight e fallito, cercare i log di fallimento, non pretendere un marker Completed.
 
+La cronologia tecnica e disponibile anche senza log del worker, per esempio dopo un 503 di accodamento:
+
+```powershell
+az storage blob list --subscription $HostingSubscription --account-name $StorageAccount `
+    --container-name $LogContainer --prefix "sessions/$SessionId/" --auth-mode login `
+    --query '[].name' -o tsv --only-show-errors
+if ($LASTEXITCODE -ne 0) { throw 'Elenco della cronologia operazioni non disponibile.' }
+```
+
+I file `Invoke-DRReplication-<runId>.log`, `Process-DRSession-<runId>.log` e `Get-DRStatus-<runId>.log` contengono le azioni Azure, i relativi esiti e la configurazione rilevata. Non sono un nuovo formato del report cliente. Un errore di accodamento resta un 503: leggere il dettaglio tecnico e correggere rete, coda o ruoli prima di ritentare con lo stesso identificativo.
+
 Per diagnosi del processo, in Application Insights interrogare le tracce sostituendo il valore:
 
 ```kusto
@@ -411,6 +424,8 @@ $ResourceChecks | Sort-Object Ordine | Format-Table -AutoSize
 ```
 
 Una VM appena creata puo avere completato il provisioning prima che il guest agent, il processo interno che comunica con Azure, sia Ready. Attendere e ricontrollare: il collaudo automatico usa un limite di cinque minuti. Verificare anche dischi/cifratura, NIC/IP/ASG/backend pool e il servizio applicativo.
+
+Per le associazioni di rete leggere gli ID NIC direttamente dalla VM DR, senza cercare la NIC nel gruppo della VM. Controllare ogni configurazione IP e tutti i pool, identificando i Load Balancer tramite ID completi: nomi uguali in gruppi diversi non indicano la stessa risorsa. I log di scoperta riportano il mapping dei gruppi sorgenti/DR. Le regole di rete, i frontend e i probe restano esterni alla Function.
 
 **Per una creazione nuova:** le date di creazione devono rispettare il piano sistemico -> altamente critico -> critico -> non critico. In riuso le date sono storiche: usare gli istanti dei tentativi per dimostrare la sequenza e non dichiarare copie nuove.
 
@@ -496,8 +511,8 @@ Per il primo caso, dalla radice del checkout aggiornato e dopo aver sostituito i
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-if ((git branch --show-current) -ne 'feature/async-session-id-csv-log') { throw 'Checkout non corrispondente alla versione richiesta.' }
-git pull --ff-only origin feature/async-session-id-csv-log
+if ((git branch --show-current) -ne 'feature/multiple-lb_logging-actions-and-info-check-rg') { throw 'Checkout non corrispondente alla versione richiesta.' }
+git pull --ff-only origin feature/multiple-lb_logging-actions-and-info-check-rg
 if ($LASTEXITCODE -ne 0) { throw 'Aggiornamento Git non riuscito; verificare autorizzazione al repository privato.' }
 ./scripts/build.ps1 -PackagePath './out/function-app.zip'
 ./scripts/deploy.ps1 `
@@ -607,6 +622,7 @@ La procedura principale usa un'app gia distribuita e un ambiente approvato; non 
 - Passi 14 e 17: [copia diretta dei dischi](https://learn.microsoft.com/azure/virtual-machines/scripts/copy-managed-disks-to-same-or-different-subscription), [durata esecuzioni e limite HTTP](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
 - Deployment: [scripts/deploy.ps1](../scripts/deploy.ps1), [build Bash nativa](../scripts/build.sh), [deploy Bash nativo](../scripts/deploy.sh), [pubblicazione Azure Functions](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan), [download manuale dei moduli](https://learn.microsoft.com/powershell/gallery/how-to/working-with-packages/manual-download?view=powershellget-3.x).
 - Target esplicito e parametri: [lettura dei riferimenti della Function App](https://learn.microsoft.com/cli/azure/functionapp#az-functionapp-show), [parameter set PowerShell](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_parameter_sets?view=powershell-7.6), [tabella dei parametri nel README](../README.md#come-pubblicare-senza-terraform-con-i-parametri-del-target).
+- Rete e cronologia: [mapping e prerequisiti](../function-app/Modules/DRCore/DRCore.psm1), [audit condiviso](../function-app/Modules/DRAudit/DRAudit.psm1), [diagnostica prima del worker](../tests/submission-diagnostics.ps1), [collaudo Azure isolato](../tests/live-multiple-load-balancers.ps1).
 
 ## Glossario per la conduzione del test
 

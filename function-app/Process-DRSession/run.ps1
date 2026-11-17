@@ -4,19 +4,22 @@ $ErrorActionPreference = 'Stop'
 $appRoot = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $appRoot 'Modules/DRSessions/DRSessions.psm1') -ErrorAction Stop
 Import-Module (Join-Path $appRoot 'Modules/DRCore/DRCore.psm1') -ErrorAction Stop
-$message = if ($QueueItem -is [string]) {
-    $QueueItem | ConvertFrom-Json -AsHashtable -ErrorAction Stop
-}
-elseif ($QueueItem -is [System.Collections.IDictionary]) { $QueueItem }
-else { throw 'The DR queue payload must be a JSON object.' }
-$sessionId = ConvertTo-DRSessionId ([string]$message.sessionId)
-if ($message.schemaVersion -ne 1) { throw 'Unsupported DR queue message schema.' }
-$messageId = [string]$TriggerMetadata.Id
-if ([string]::IsNullOrWhiteSpace($messageId)) { throw 'The queue message ID is required for safe session ownership.' }
-$client = New-DRStorageClient
+Initialize-DRAudit -FunctionName 'Process-DRSession'
+$client = $null
 $claimed = $false
-
+$sessionId = ''
 try {
+    $message = if ($QueueItem -is [string]) {
+        $QueueItem | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    }
+    elseif ($QueueItem -is [System.Collections.IDictionary]) { $QueueItem }
+    else { throw 'The DR queue payload must be a JSON object.' }
+    $sessionId = ConvertTo-DRSessionId ([string]$message.sessionId)
+    Set-DRAuditContext -SessionId $sessionId
+    if ($message.schemaVersion -ne 1) { throw 'Unsupported DR queue message schema.' }
+    $messageId = [string]$TriggerMetadata.Id
+    if ([string]::IsNullOrWhiteSpace($messageId)) { throw 'The queue message ID is required for safe session ownership.' }
+    $client = New-DRStorageClient
     for ($attempt = 0; $attempt -lt 5; $attempt++) {
         $record = Get-DRSessionState $client $sessionId
         if ($null -eq $record) { throw "Session '$sessionId' is not registered." }
@@ -121,7 +124,7 @@ try {
     Write-Host "Session $sessionId completed successfully."
 }
 catch {
-    Write-Host "Session $sessionId worker failed: $($_.Exception)"
+    Write-DRAuditEvent -Operation 'Process queued DR session' -Status Failed -ErrorMessage $_.Exception.Message
     if ($claimed) {
         $current = Get-DRSessionState $client $sessionId
         if ($current.Value.status -notin @('SUCCEEDED', 'FAILED')) {
@@ -141,4 +144,7 @@ catch {
         }
     }
     throw
+}
+finally {
+    if ($null -ne $client) { Save-DRSessionAudit $client }
 }

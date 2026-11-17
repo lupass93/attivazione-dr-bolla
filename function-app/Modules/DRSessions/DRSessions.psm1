@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot '../DRAudit/DRAudit.psm1') -Global -ErrorAction Stop
 
 function Stop-DRRequest {
     param([int]$StatusCode, [string]$Message)
@@ -43,8 +44,12 @@ function New-DRStorageClient {
     Assert-DRPrivateEndpoint ([uri]$blobEndpoint)
     Assert-DRPrivateEndpoint ([uri]$queueEndpoint)
     Disable-AzContextAutosave -Scope Process | Out-Null
-    $profile = (Connect-AzAccount -Identity -AccountId $env:SOURCE_IDENTITY_CLIENT_ID `
-        -Subscription $env:HOSTING_SUBSCRIPTION_ID -SkipContextPopulation -Scope Process -ErrorAction Stop).Context
+    $profile = (Invoke-DRAzureOperation -Operation 'Connect-AzAccount' -Plane Identity `
+        -ResourceId "/subscriptions/$env:HOSTING_SUBSCRIPTION_ID" -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID `
+        -ScriptBlock {
+            Connect-AzAccount -Identity -AccountId $env:SOURCE_IDENTITY_CLIENT_ID `
+                -Subscription $env:HOSTING_SUBSCRIPTION_ID -SkipContextPopulation -Scope Process -ErrorAction Stop
+        }).Context
     return @{
         BlobEndpoint = $blobEndpoint.TrimEnd('/')
         QueueEndpoint = $queueEndpoint.TrimEnd('/')
@@ -52,6 +57,7 @@ function New-DRStorageClient {
         Container = [string]($env:SESSION_CONTAINER_NAME ?? 'dr-sessions')
         QueueName = [string]($env:DR_QUEUE_NAME ?? 'dr-activation')
         Profile = $profile
+        ResourceId = [string]$env:DR_STORAGE_RESOURCE_ID
     }
 }
 
@@ -61,7 +67,10 @@ function Invoke-DRStorageRequest {
         [hashtable]$Headers = @{}, [AllowNull()][string]$Body,
         [string]$ContentType = 'application/json', [int[]]$AllowedStatus = @(200)
     )
-    $access = Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/' -DefaultProfile $Client.Profile -ErrorAction Stop
+    $access = Invoke-DRAzureOperation -Operation 'Get-AzAccessToken (Storage)' -Plane Identity `
+        -ResourceId 'https://storage.azure.com/' -Profile $Client.Profile -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID -ScriptBlock {
+            Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/' -DefaultProfile $Client.Profile -ErrorAction Stop
+        }
     $token = if ($access.Token -is [securestring]) { ConvertFrom-SecureString $access.Token -AsPlainText } else { [string]$access.Token }
     $requestHeaders = @{
         Authorization = "Bearer $token"
@@ -78,15 +87,50 @@ function Invoke-DRStorageRequest {
         $arguments.ContentType = $ContentType
     }
     try {
-        $response = Invoke-WebRequest @arguments
-        if ([int]$response.StatusCode -notin $AllowedStatus) {
-            throw "Storage $Method failed with HTTP $([int]$response.StatusCode), code '$($response.Headers['x-ms-error-code'])'. Request ID: $($response.Headers['x-ms-request-id'])."
+        $subscriptionId = [string]$env:HOSTING_SUBSCRIPTION_ID
+        $resourceGroup = ''
+        if ($Client.ContainsKey('ResourceId') -and $Client.ResourceId -match '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft.Storage/storageAccounts/[^/]+$') {
+            $subscriptionId = $Matches[1]; $resourceGroup = $Matches[2]
         }
-        return $response
+        return Invoke-DRAzureOperation -Operation "Storage $Method" -Plane Data -ResourceId $Uri `
+            -Profile $Client.Profile -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID `
+            -SubscriptionId $subscriptionId -ResourceGroup $resourceGroup -ScriptBlock {
+                $response = Invoke-WebRequest @arguments
+                if ([int]$response.StatusCode -notin $AllowedStatus) {
+                    throw "Storage $Method failed with HTTP $([int]$response.StatusCode), code '$($response.Headers['x-ms-error-code'])'. Request ID: $($response.Headers['x-ms-request-id'])."
+                }
+                Write-DRAuditEvent -Operation "Storage $Method response" -Plane Data -ResourceId $Uri `
+                    -SubscriptionId $subscriptionId -ResourceGroup $resourceGroup -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID `
+                    -Details @{ httpStatus = [int]$response.StatusCode
+                        requestId = [string]$response.Headers['x-ms-request-id']; errorCode = [string]$response.Headers['x-ms-error-code'] }
+                return $response
+            }
     }
     finally {
         $requestHeaders.Remove('Authorization')
         $token = $null
+    }
+}
+
+function Save-DRSessionAudit {
+    param([hashtable]$Client)
+    $context = Get-DRAuditContext
+    $entries = @(Get-DRAuditEntries)
+    if ($entries.Count -eq 0) { return }
+    $id = [guid]::Empty
+    $path = if ([guid]::TryParseExact([string]$context.sessionId, 'D', [ref]$id) -and $id -ne [guid]::Empty) {
+        "sessions/$id/$($context.functionName)-$($context.runId).log"
+    } else { "requests/$($context.runId).log" }
+    $container = [string]($env:LOG_CONTAINER_NAME ?? 'dr-logs')
+    try {
+        Invoke-DRStorageRequest -Client $Client -Method PUT -Uri (Get-DRBlobUri $Client $container $path) `
+            -Headers @{ 'x-ms-blob-type' = 'BlockBlob' } -Body ($entries -join "`n") `
+            -ContentType 'text/plain; charset=utf-8' -AllowedStatus @(201) | Out-Null
+    }
+    catch {
+        Write-DRAuditEvent -Operation 'Persist operation audit' -Plane Data -Status Failed `
+            -ResourceId (Get-DRBlobUri $Client $container $path) -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID `
+            -ErrorMessage $_.Exception.Message -Details @{ originalOperationOutcomeRetained = $true }
     }
 }
 
@@ -360,6 +404,15 @@ function Register-DRSession {
     }
     $created = Write-DRSessionState $Client $SessionId $state -CreateOnly
     if (-not $created) { Write-Host "Session $SessionId already exists; preserving its stored state." }
+    foreach ($row in $manifest.rows) {
+        Set-DRAuditContext -VmName $row.SourceVmName -Criticita ([string]$row['Criticita']) -Acronimo ([string]$row['Acronimo'])
+        Write-DRAuditEvent -Operation 'Record immutable VM activation plan' -ResourceId ([string]$row['ResourceKey']) `
+            -SubscriptionId $row.SourceSubscription -ResourceGroup $row.SourceResourceGroup -Details @{
+                csvRow = $row['CsvRow']; priority = $row['Priority']; sourceVmName = $row.SourceVmName
+                creationPerformed = $false
+            }
+    }
+    Set-DRAuditContext -VmName '' -Criticita '' -Acronimo ''
     return (Get-DRSessionState $Client $SessionId).Value
 }
 
@@ -377,7 +430,16 @@ function Submit-DRSession {
             -AllowedStatus @(201) | Out-Null
     }
     catch {
-        Write-Host "Queue acknowledgement failed for session ${SessionId}: $($_.Exception.Message)"
+        $submissionError = Protect-DRAuditText $_.Exception.Message
+        Write-DRAuditEvent -Operation 'Queue acknowledgement' -Plane Data -Status Failed `
+            -ResourceId "$($Client.QueueEndpoint)/$($Client.QueueName)" -IdentityClientId $env:SOURCE_IDENTITY_CLIENT_ID `
+            -ErrorMessage $submissionError -Details @{ sameSessionRetryRequired = $true }
+        try {
+            Update-DRSessionState $Client $SessionId -Changes @{ submissionError = $submissionError } | Out-Null
+        }
+        catch {
+            Write-DRAuditEvent -Operation 'Persist queue submission error' -Status Failed -ErrorMessage $_.Exception.Message
+        }
         Stop-DRRequest 503 'Queue acceptance could not be confirmed. Consult Get-DRStatus and retry the same sessionId; do not generate a replacement ID.'
     }
     return Update-DRSessionState -Client $Client -SessionId $SessionId -QueueConfirmed
@@ -411,4 +473,4 @@ function Get-DRSessionResponse {
 
 Export-ModuleMember -Function Stop-DRRequest, ConvertTo-DRSessionId, New-DRStorageClient, Read-DRDocument, `
     Write-DRDocument, Get-DRSessionState, Update-DRSessionState, Read-DRCsvRequest, Register-DRSession, `
-    Submit-DRSession, Get-DRSessionResponse, Resolve-DRCriticality, Write-DRSessionState
+    Submit-DRSession, Get-DRSessionResponse, Resolve-DRCriticality, Write-DRSessionState, Save-DRSessionAudit

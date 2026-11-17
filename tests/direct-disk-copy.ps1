@@ -48,7 +48,8 @@ function Invoke-CopyCase {
         }
         function Get-DRPrerequisites {
             param($VmName, $VmResourceGroup, $VnetResourceGroup, $VnetName, $SubnetName, $AsgNames,
-                $DesResourceGroup, $LoadBalancerName, $LoadBalancerResourceGroup, $SourcePoolNames, $PoolNameOverride, $DefaultProfile)
+                $DesResourceGroup, $LoadBalancerName, $LoadBalancerResourceGroup, $SourcePoolNames, $PoolNameOverride, $DefaultProfile,
+                $AsgReferences, $NsgReferences, $LoadBalancerReferences, $NicResourceGroup)
             @{ Subnet = $null; AsgIds = @() }
         }
         function Set-SubscriptionContext { param($SubscriptionId, $FriendlyName) }
@@ -153,6 +154,10 @@ function Invoke-CopyCase {
         $SessionId = '00000000-0000-0000-0000-000000000099'
         $PreflightOnly = $false
         $srcAsgIds = @()
+        $asgReferences = @()
+        $nsgReferences = @()
+        $loadBalancerReferences = @()
+        $targetNicRg = 'rg-dr'
         $srcBackendPoolNames = @()
         $targetVmRg = 'rg-dr'
         $targetVnetRg = 'rg-network-dr'

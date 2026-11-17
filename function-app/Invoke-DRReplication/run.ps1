@@ -4,6 +4,8 @@ param($Request, $TriggerMetadata)
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'Modules/DRSessions/DRSessions.psm1') -ErrorAction Stop
+Initialize-DRAudit -FunctionName 'Invoke-DRReplication'
+$client = $null
 
 try {
     try {
@@ -15,6 +17,7 @@ try {
         Stop-DRRequest 400 'Only sessionId and csvBlobPath are supported request parameters.'
     }
     $sessionId = ConvertTo-DRSessionId ([string]$body.sessionId)
+    Set-DRAuditContext -SessionId $sessionId
     if ($body.csvBlobPath -isnot [string] -or [string]::IsNullOrWhiteSpace($body.csvBlobPath)) {
         Stop-DRRequest 400 'csvBlobPath is required and must be a string.'
     }
@@ -33,7 +36,7 @@ try {
     })
 }
 catch {
-    Write-Host "DR submission failed: $($_.Exception)"
+    Write-DRAuditEvent -Operation 'Submit DR session' -Status Failed -ErrorMessage $_.Exception.Message
     $code = if ($_.Exception.Data.Contains('HttpStatusCode')) { [int]$_.Exception.Data['HttpStatusCode'] } else { 503 }
     $message = if ($_.Exception.Data.Contains('HttpStatusCode')) { $_.Exception.Message } else { 'DR submission is unavailable. Consult the Function logs and retry the same sessionId.' }
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
@@ -41,4 +44,7 @@ catch {
         Headers = @{ 'Content-Type' = 'application/json' }
         Body = (@{ error = $message } | ConvertTo-Json)
     })
+}
+finally {
+    if ($null -ne $client) { Save-DRSessionAudit $client }
 }

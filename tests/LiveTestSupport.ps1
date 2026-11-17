@@ -4,8 +4,13 @@ $script:LiveChecks = 0
 $script:LivePlatformRetries = 0
 
 function Initialize-LiveDRTest {
-    $text = terraform "-chdir=$(Join-Path $script:LiveRoot 'terraform')" output -json
-    if ($LASTEXITCODE -ne 0) { throw 'Terraform outputs are unavailable.' }
+    param([string]$ConfigurationPath)
+    if ($ConfigurationPath) {
+        $text = Get-Content -LiteralPath $ConfigurationPath -Raw
+    } else {
+        $text = terraform "-chdir=$(Join-Path $script:LiveRoot 'terraform')" output -json
+        if ($LASTEXITCODE -ne 0) { throw 'Terraform outputs are unavailable.' }
+    }
     $script:LiveOutputs = ($text -join "`n") | ConvertFrom-Json -AsHashtable
     $script:LiveApi = $script:LiveOutputs.api_url.value
     $script:LiveStorage = $script:LiveOutputs.storage_account_name.value

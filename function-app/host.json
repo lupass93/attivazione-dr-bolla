@@ -15,10 +15,13 @@
     }
   },
   "logging": {
+    "logLevel": {
+      "default": "Information",
+      "Function": "Information"
+    },
     "applicationInsights": {
       "samplingSettings": {
-        "isEnabled": true,
-        "excludedTypes": "Request"
+        "isEnabled": false
       }
     }
   },

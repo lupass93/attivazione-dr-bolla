@@ -191,6 +191,7 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     SOURCE_IDENTITY_CLIENT_ID                 = data.azurerm_user_assigned_identity.source.client_id
     TARGET_IDENTITY_CLIENT_ID                 = data.azurerm_user_assigned_identity.target.client_id
     HOSTING_SUBSCRIPTION_ID                   = var.hosting_subscription_id
+    DR_STORAGE_RESOURCE_ID                    = data.azurerm_storage_account.hosting.id
     CSV_STORAGE_CONNECTION__blobServiceUri    = data.azurerm_storage_account.hosting.primary_blob_endpoint
     CSV_CONTAINER_NAME                        = azurerm_storage_container.application["dr-configs"].name
     LOG_CONTAINER_NAME                        = azurerm_storage_container.application["dr-logs"].name

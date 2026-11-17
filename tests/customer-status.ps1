@@ -20,6 +20,14 @@ $state.results[4].status = 'NOT_STARTED'
 Update-DRSessionState $global:TestClient $id -Changes @{ status = $state.status; results = $state.results } | Out-Null
 $response = Get-DRSessionResponse (Get-DRSessionState $global:TestClient $id).Value
 $wire = $response | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable
+$rootFields = @('sessionId', 'status', 'phase', 'createdAt', 'acceptedAt', 'startedAt', 'updatedAt', 'completedAt',
+    'queueConfirmed', 'requiresReview', 'error', 'csvBlobPath', 'csvSha256', 'vmCount', 'results', 'summary',
+    'schemaVersion', 'platform', 'id', 'activity', 'running', 'sistemico', 'altamente-critico', 'critico', 'non-critico')
+Assert-Test ((($wire.Keys | Sort-Object) -join ',') -ceq (($rootFields | Sort-Object) -join ',')) 'Technical audit changes must not add, remove or rename status response fields.'
+$rowFields = @('sourceSubscription', 'sourceResourceGroup', 'vmName', 'sourceSubscriptionId', 'targetSubscriptionId',
+    'status', 'error', 'criticita', 'acronimo', 'priorityClass', 'priority', 'csvRow', 'activationOrder', 'resourceKey',
+    'startedAt', 'completedAt')
+Assert-Test ((($wire.results[0].Keys | Sort-Object) -join ',') -ceq (($rowFields | Sort-Object) -join ',')) 'Per-VM response fields must preserve the existing Azure/customer contract.'
 Assert-Test ($wire.id -eq $id -and $wire.sessionId -eq $id -and $wire.activity -eq 'dr-activation') 'Client ID and Azure activity must remain unambiguous.'
 Assert-Test ($wire.running -is [string] -and $wire.running -ceq 'true') 'The legacy running field must retain its string type.'
 foreach ($class in @('sistemico', 'altamente-critico', 'critico', 'non-critico')) {

@@ -5,7 +5,7 @@
 |---|---|
 | **Container `app-package`** | Conserva il pacchetto ZIP del codice che Azure esegue nella Function App. |
 | **Container `dr-configs`** | Conserva i CSV di input, caricati dal client prima di chiamare Invoke. |
-| **Container `dr-logs`** | Conserva i log dettagliati delle operazioni su dischi, rete e VM, utili per diagnosticare gli errori. |
+| **Container `dr-logs`** | Conserva i log per stage e la cronologia delle operazioni Azure, inclusi gli errori prima dell'avvio del worker. La cronologia si trova in `sessions/<sessionId>/<nome-funzione>-<runId>.log`. |
 | **Container `dr-sessions`** | Conserva richiesta, piano e stato aggiornato di ogni sessione. **È la fonte letta da Get-DRStatus.** |
 | **Coda `dr-activation`** | Trasporta il messaggio con `sessionId` che attiva la funzione di elaborazione. **Un messaggio riguarda un’intera sessione/CSV, non una singola VM.** |
 | **Coda `dr-activation-poison`** | Raccoglie i messaggi che il runtime non riesce a elaborare dopo **5 tentativi**, per consentire l’analisi e l’intervento dell’operatore. Non è l’elenco di tutte le VM fallite. |
@@ -64,8 +64,8 @@ Sostituisci i riferimenti fittizi con quelli delle **VM sorgenti** del cliente. 
 3. **Il client chiama `Invoke-DRReplication`**, passando `sessionId` e `csvBlobPath`, il percorso del file dentro il container.
 4. **Invoke valida richiesta e CSV** e registra il piano della sessione, che non cambia se successivamente viene modificato il file.
 5. **Invoke accoda la sessione in Azure Storage Queue** e, soltanto dopo la conferma dell’accodamento, restituisce **HTTP 202 Accepted** per la nuova richiesta.
-6. **`Process-DRSession`, la funzione attivata dalla coda, verifica i prerequisiti Azure**. Se mancano, conclude con errore senza creare risorse workload.
-7. **Il worker esegue le attivazioni** nell’ordine **sistemico → altamente critico → critico → non critico**, aggiornando stato e log. A parità di priorità conserva l’ordine del CSV.
+6. **`Process-DRSession`, la funzione attivata dalla coda, verifica i prerequisiti Azure**, inclusi tutti i Load Balancer e backend pool della NIC primaria nei rispettivi Resource Group DR. Se mancano, conclude con errore senza creare risorse workload.
+7. **Il worker esegue le attivazioni** nell’ordine **sistemico → altamente critico → critico → non critico**, aggiornando stato e log. Mantiene le configurazioni IP e le associazioni backend della NIC primaria; a parità di priorità conserva l’ordine del CSV.
 8. **Il client consulta `Get-DRStatus`** con lo stesso `sessionId`, fino allo stato finale `SUCCEEDED` oppure `FAILED`.
 
 ## Esempi semplici con curl
@@ -97,6 +97,8 @@ curl -sS -i -X POST "$API_URL/Invoke-DRReplication" \
 ```
 
 **Risposta attesa per una nuova richiesta valida: `202 Accepted`.** Se perdi la risposta, ritenta con **lo stesso `sessionId` e CSV invariato**, senza generare un’altra sessione.
+
+**Se ricevi 503 per accodamento non confermato:** consulta Get-DRStatus e la cronologia di Invoke nel container log. Il worker potrebbe non essere ancora partito. La risposta HTTP e il formato dei quattro blocchi cliente restano invariati; l'errore tecnico e nella cronologia, senza credenziali.
 
 ### Consultare Get-DRStatus
 

@@ -4,6 +4,8 @@ param($Request, $TriggerMetadata)
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'Modules/DRSessions/DRSessions.psm1') -ErrorAction Stop
+Initialize-DRAudit -FunctionName 'Get-DRStatus'
+$client = $null
 
 try {
     $inputId = if ($Request.Method -eq 'GET') { $Request.Query.sessionId } else {
@@ -15,6 +17,7 @@ try {
         $body.sessionId
     }
     $sessionId = ConvertTo-DRSessionId ([string]$inputId)
+    Set-DRAuditContext -SessionId $sessionId
     $client = New-DRStorageClient
     $record = Get-DRSessionState $client $sessionId
     if ($null -eq $record) { Stop-DRRequest 404 'No session exists with the requested sessionId.' }
@@ -25,7 +28,7 @@ try {
     })
 }
 catch {
-    Write-Host "DR status failed: $($_.Exception)"
+    Write-DRAuditEvent -Operation 'Read DR session status' -Status Failed -ErrorMessage $_.Exception.Message
     $code = if ($_.Exception.Data.Contains('HttpStatusCode')) { [int]$_.Exception.Data['HttpStatusCode'] } else { 503 }
     $message = if ($_.Exception.Data.Contains('HttpStatusCode')) { $_.Exception.Message } else { 'Session status is unavailable. Consult the Function logs.' }
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
@@ -33,4 +36,7 @@ catch {
         Headers = @{ 'Content-Type' = 'application/json' }
         Body = (@{ error = $message } | ConvertTo-Json)
     })
+}
+finally {
+    if ($null -ne $client) { Save-DRSessionAudit $client }
 }

@@ -217,7 +217,7 @@ for required in host.json profile.ps1 requirements.psd1 \
     Invoke-DRReplication/run.ps1 Invoke-DRReplication/function.json \
     Get-DRStatus/run.ps1 Get-DRStatus/function.json \
     Process-DRSession/run.ps1 Process-DRSession/function.json \
-    Modules/DRCore/DRCore.psm1 Modules/DRSessions/DRSessions.psm1; do
+    Modules/DRCore/DRCore.psm1 Modules/DRSessions/DRSessions.psm1 Modules/DRAudit/DRAudit.psm1; do
     [[ -f "$stage/$required" ]] || fail "Deployment package is missing $required."
 done
 for configuration in host.json Invoke-DRReplication/function.json Get-DRStatus/function.json Process-DRSession/function.json; do

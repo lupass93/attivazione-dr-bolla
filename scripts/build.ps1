@@ -71,7 +71,8 @@ try {
     }
     $entries = @($archive.Entries.FullName)
     foreach ($required in @('host.json', 'profile.ps1', 'Invoke-DRReplication/run.ps1', 'Get-DRStatus/run.ps1',
-            'Process-DRSession/run.ps1', 'Process-DRSession/function.json', 'Modules/DRCore/DRCore.psm1', 'Modules/DRSessions/DRSessions.psm1')) {
+            'Process-DRSession/run.ps1', 'Process-DRSession/function.json', 'Modules/DRCore/DRCore.psm1', 'Modules/DRSessions/DRSessions.psm1',
+            'Modules/DRAudit/DRAudit.psm1')) {
         if ($entries -notcontains $required) { throw "Deployment package is missing $required." }
     }
     if ($entries -contains 'local.settings.json') { throw 'Local settings must not be deployed.' }

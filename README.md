@@ -2,7 +2,7 @@
 
 La soluzione ricrea Virtual Machine (VM), server virtuali Azure, in un ambiente di Disaster Recovery (DR), cioe di ripristino. Azure Functions esegue PowerShell 7.6 sul piano Flex Consumption. Il codice deriva da [stefze/Attivazione-Bolla](https://github.com/stefze/Attivazione-Bolla).
 
-**Questo README descrive `feature/async-session-id-csv-log`, derivato da `feature/async-session-id`.** Git non permette il nome `feature/async-session-id/csv-log` mentre esiste il ramo padre: il nome alternativo mantiene intatto il padre. Questa versione aggiunge criticita, acronimo e report compatibile con il tracciato cliente. Restano routing multisubscription e copia diretta dei managed disk, dischi gestiti da Azure, senza snapshot intermedi. Uno snapshot e una copia puntuale conservata come risorsa separata; questo flusso non ne crea, legge o riusa.
+**Questo README descrive `feature/multiple-lb_logging-actions-and-info-check-rg`.** La versione aggiunge associazioni a piu Load Balancer, Resource Group di networking indipendenti e cronologia delle operazioni Azure. CSV a cinque colonne, sessioni asincrone, priorita e contratto JSON cliente restano invariati. Restano routing multisubscription e copia diretta dei managed disk, dischi gestiti da Azure, senza snapshot intermedi. Uno snapshot e una copia puntuale conservata come risorsa separata; questo flusso non ne crea, legge o riusa.
 
 **Per condurre la prova con il cliente:** seguire la [guida operativa passo per passo](docs/guida-test-cliente.md). Include uso di tutte e tre le funzioni, comandi, risultati attesi, gestione degli errori e resoconto aggiornato, senza richiedere un nuovo deployment se l'app e gia pronta.
 
@@ -69,7 +69,7 @@ Le operazioni su VM/dischi/rete usano invece Azure Resource Manager (ARM), il se
 | Nel DR: Resource Group, VNet/subnet, ASG, DES e, se necessari, Load Balancer/backend pool. | Container pacchetto/CSV/log/sessioni, coda di attivazione e coda dei messaggi falliti. |
 | Ruoli delle identita e prerequisiti di cifratura. | Application Insights, Log Analytics workspace e diagnostica. |
 
-Application Insights raccoglie telemetria del processo; Log Analytics permette di consultare log e metriche. I log per stage nel container Blob servono alla diagnosi, mentre lo stato della sessione e conservato separatamente.
+Application Insights raccoglie telemetria del processo; Log Analytics permette di consultare log e metriche. Il container log conserva i file per stage e la cronologia tecnica delle operazioni, anche quando l'accodamento fallisce. Lo stato della sessione resta separato.
 
 I nomi predefiniti dei container sono `app-package`, `dr-configs`, `dr-logs`, `dr-sessions`. La coda e `dr-activation`; `dr-activation-poison` riceve i messaggi che esauriscono i tentativi di consegna. La mappa ambientale esistente `resource_names` permette nomi cliente, inclusi `session_container` e `activation_queue`. Non sono introdotte nuove variabili root o alias di letterali; gli input esistenti restano l'interfaccia per ambienti e tenant differenti.
 
@@ -104,6 +104,18 @@ Il worker risolve la primaria tramite UAMI sorgente e la relativa DR tramite UAM
 
 `target_name_suffix`, anch'esso predefinito `-DR`, determina invece i nomi dei prerequisiti: Resource Group, VNet, ASG, DES e Load Balancer. La subnet conserva il nome sorgente; VM e dischi conservano i propri nomi. I due suffissi sono indipendenti.
 
+### Come vengono mantenute le associazioni di rete e i Resource Group distinti
+
+La Function legge gli identificativi completi della NIC primaria e delle sue configurazioni IP. Ogni Load Balancer viene identificato da subscription, Resource Group e nome: due Load Balancer omonimi in gruppi diversi non vengono confusi. Tutti i loro backend pool richiesti devono esistere prima delle creazioni.
+
+La NIC DR viene creata nel gruppo ricavato da quello della NIC sorgente, usando il suffisso Resource Group esistente. VNet, ASG, NSG e ciascun Load Balancer usano il proprio Resource Group sorgente, non quello della VM. Per ASG/NSG si applica il suffisso dei gruppi di rete; il nome NSG usa il suffisso dei nomi VNet gia configurato. Non vengono introdotte nuove variabili di naming.
+
+La replica mantiene tutte le configurazioni IP della NIC primaria, gli indirizzi privati statici e gli ASG di ciascuna configurazione. Una nuova NIC conserva anche il collegamento al corrispondente NSG. Il codice non riscrive le regole NSG o le associazioni della subnet, che restano responsabilita del gestore della rete.
+
+I pool vengono cercati per nome nel rispettivo Load Balancer DR. `BACKEND_POOL_NAME_OVERRIDE` resta utilizzabile quando un Load Balancer sorgente usa un solo pool; non puo sostituire piu pool distinti con uno solo. Dopo la creazione della VM, tutte le associazioni mancanti vengono aggiunte alla NIC in un unico aggiornamento e rilette per verifica. Il riuso non duplica le associazioni e non elimina collegamenti preesistenti.
+
+Le combinazioni devono essere supportate da Azure. La Function non crea i Load Balancer e non modifica frontend, regole, probe o configurazioni esterne per rendere accettabile una topologia non supportata.
+
 Esempio: la primaria `site-a` viene associata a `site-a-DR`; `rg-web` e `vnet-web` richiedono `rg-web-DR` e `vnet-web-DR`. Un'altra primaria `site-b` viene associata alla propria `site-b-DR`, anche nello stesso CSV.
 
 Un Application Security Group (ASG) raggruppa NIC per l'applicazione delle regole di sicurezza. Un Disk Encryption Set (DES) indica la chiave utilizzata per cifrare i dischi. Il DES DR determina la regione della replica.
@@ -119,7 +131,7 @@ Un Application Security Group (ASG) raggruppa NIC per l'applicazione delle regol
 5. **Invoke registra lo stato iniziale e accoda il riferimento.** Il messaggio contiene soltanto versione del formato e `sessionId`, non un CSV che potrebbe essere modificato successivamente. Il client storage attende esplicitamente HTTP 201 dalla Queue prima di preparare HTTP 202.
 6. **Il worker acquisisce lo stato con una scrittura condizionale.** Blob Storage confronta l'ETag, identificatore della versione del file: soltanto un concorrente puo acquisire quella versione della sessione. Il worker conserva l'identificativo del messaggio proprietario.
 7. **Il worker esegue il preflight di tutte le righe.** Scopre sorgenti e destinazioni, valida la copia diretta e verifica esistenza/accessibilita dei prerequisiti. Se una riga fallisce, registra le non conformita rilevate e non crea workload per nessuna riga.
-8. **Il worker esegue la replica delle VM in sequenza.** Per ogni VM ricontrolla i prerequisiti, copia/riusa i dischi, crea/riusa NIC e VM e collega il backend pool previsto.
+8. **Il worker esegue la replica delle VM in sequenza.** Per ogni VM ricontrolla i prerequisiti, copia/riusa i dischi, crea/riusa NIC e VM e collega tutti i backend pool previsti.
 9. **Il worker registra ogni esito.** Aggiorna `sessions/<sessionId>/state.json` e i log per stage, identificati dalla stessa sessione e dall'identita completa subscription/gruppo/VM.
 10. **Il client legge Get-DRStatus con lo stesso `sessionId`.** L'API legge lo stato registrato, senza rileggere il CSV attuale e senza cercare il log modificato piu recentemente.
 
@@ -130,9 +142,9 @@ La risposta dello starter non attende preflight o replica. Il worker puo iniziar
 | Quale prerequisito controlla il worker | Quale attivita rimane esterna alla Function |
 |---|---|
 | Risoluzione univoca delle subscription e lettura della VM/dischi/NIC sorgenti. | Gestione delle subscription e scelta delle risorse autorizzate. |
-| Resource Group DR necessari, VNet e subnet con il nome previsto. | Creazione rete, routing, DNS del workload e relative regole. |
-| Tutti gli ASG derivati dalla NIC sorgente. Un ASG richiesto mancante blocca la sessione. | Riconciliazione delle regole di un Network Security Group (NSG), il filtro di traffico Azure, e delle configurazioni esterne. |
-| Load Balancer e backend pool selezionabile, soltanto quando la sorgente li usa. | Confronto/riproduzione di frontend, regole e health probe, i controlli di raggiungibilita del servizio. |
+| Resource Group DR di VM, NIC, VNet, ASG, NSG, DES e Load Balancer, ciascuno ricavato dalle proprie relazioni sorgenti. | Creazione rete, routing, DNS del workload e relative regole. |
+| Tutti gli ASG e gli NSG referenziati dalla NIC/subnet sorgenti nei rispettivi gruppi. Un prerequisito richiesto mancante blocca la sessione. | Riconciliazione delle regole di un Network Security Group (NSG), il filtro di traffico Azure, e delle configurazioni esterne. |
+| Tutti i Load Balancer e tutti i backend pool corrispondenti alle configurazioni IP della NIC primaria. | Confronto/riproduzione di frontend, regole e health probe, i controlli di raggiungibilita del servizio. |
 | DES DR, tipo di cifratura supportato, stesso tenant e stessa regione per i dischi. | Preparazione di Key Vault/chiave, autorizzazione dell'identita DES e salute della chiave. |
 
 Il preflight controlla presenza e lettura, **non certifica tutti i permessi di scrittura, la capacita compute o la coerenza delle configurazioni esterne**. Le autorizzazioni restano prerequisiti operativi. Una risorsa eliminata dopo il controllo puo comunque causare un fallimento durante la replica. Solo file di sessione e log vengono scritti durante il preflight; non vengono creati dischi, NIC o VM.
@@ -172,6 +184,22 @@ Gli identificativi delle risorse nei blocchi sono `subscription-del-CSV/resource
 
 Lo stesso report per classi e contenuto nel JSON persistente `sessions/<sessionId>/state.json`, aggiornato con scritture condizionali. Non esiste un secondo file riepilogativo indipendente che potrebbe divergere dall'API. I log testuali degli stage Azure restano nel container log e riportano anche sessione, criticita e acronimo.
 
+### Dove leggere la cronologia tecnica senza cambiare il report cliente
+
+Il modulo condiviso [DRAudit](function-app/Modules/DRAudit/DRAudit.psm1) traccia le operazioni Azure emesse dal codice: autenticazione, letture e scritture di risorse, richieste Blob/Queue e caricamento dei log. I comandi che preparano soltanto oggetti PowerShell locali non sono classificati come scritture Azure.
+
+Ogni azione ha eventi di inizio ed esito con timestamp, operazione, piano Control/Data/Identity, durata, numero del tentativo, identita e identificativo della risorsa. Sessione, VM, criticita, acronimo, fase e stage accompagnano gli eventi quando disponibili. Subscription e gruppo sono registrati per le operazioni con un ambito corrispondente; autenticazione e richieste a livello tenant non inventano un Resource Group. La scoperta conserva configurazioni IP, associazioni di rete, gruppi effettivi, dischi OS/dati, dimensioni, LUN e DES scelto. Non vengono rilevati filesystem o lettere dei volumi interni al sistema operativo.
+
+Nel container `dr-logs`, o suo nome personalizzato, la cronologia e salvata in `sessions/<sessionId>/<nome-funzione>-<runId>.log`. `runId` distingue esecuzioni e retry della stessa sessione. Questi file contengono righe leggibili con il prefisso cliente e, dopo `AUDIT`, un oggetto JSON tecnico. Non sostituiscono i file per stage, ne modificano Invoke/Get-DRStatus o i contatori delle quattro classi.
+
+L'errore originale di accodamento viene tracciato e conservato anche prima dell'avvio del worker. La risposta HTTP resta il 503 concordato; lo stato interno puo conservare `submissionError` senza aggiungere campi al contratto HTTP. Il client deve consultare lo stato e ritentare con lo stesso `sessionId` e CSV invariato.
+
+`DR_STORAGE_RESOURCE_ID` contiene l'identificativo Azure completo dello Storage Account, necessario per attribuire il suo vero Resource Group alle azioni Data Plane senza nuovi permessi di lettura. Terraform lo imposta dalla risorsa esistente; su hosting gestito diversamente configurarlo nelle impostazioni della Function. Senza questa informazione restano disponibili endpoint, identita e sessione, ma il gruppo storage non viene inventato.
+
+Gli eventi sono emessi anche nella telemetria della Function. Il file host richiede livello Information e disabilita il campionamento applicativo, cioe la selezione di un sottoinsieme dei log. Sono mascherati token, chiavi e query degli URL; non vengono serializzati header di autenticazione, corpi delle richieste o oggetti SDK completi. La scrittura dell'audit stesso viene tracciata in telemetria senza avviare altre scritture ricorsive.
+
+Se il salvataggio dei log non riesce, viene emesso un errore diagnostico senza trasformare in successo un'operazione fallita o ripetere una replica gia riuscita. Se anche la telemetria e indisponibile, non e possibile garantire la persistenza: servono storage, permessi, rete e raccolta Azure Monitor corretti. Log e polling generano transazioni e spazio aggiuntivi; la retention Blob resta esterna alla Function.
+
 Le sessioni storiche con `schemaVersion=1` rimangono consultabili nel precedente formato Azure: il codice non inventa criticita o acronimi mancanti. Le nuove richieste richiedono sempre le cinque colonne.
 
 | Quale risposta HTTP puo ricevere il client | Quale condizione indica |
@@ -210,9 +238,9 @@ Role-Based Access Control (RBAC) stabilisce quali operazioni un'identita puo ese
 | Quale identita utilizza il ruolo | Quale ruolo e quale ambito sono necessari |
 |---|---|
 | UAMI sorgente/storage. | Storage Blob Data Owner, Storage Queue Data Contributor e Storage Table Data Contributor sullo Storage Account esistente. Il ruolo Queue e ora obbligatorio per invio, ricezione, cancellazione e poison queue. |
-| UAMI sorgente/storage. | Reader sui gruppi/subscription primari da leggere; Monitoring Metrics Publisher su Application Insights o relativo gruppo. |
+| UAMI sorgente/storage. | Reader sui gruppi delle VM, NIC, VNet e dischi sorgenti effettivamente letti; Monitoring Metrics Publisher su Application Insights o relativo gruppo. |
 | UAMI DR. | Disk Backup Reader sui dischi/gruppi primari: la copia richiede anche `Microsoft.Compute/disks/beginGetAccess/action`, non il solo Reader dell'altra identita. |
-| UAMI DR. | Contributor sui gruppi workload DR; Network Contributor sulla rete quando separata; Reader sui gruppi di DES e Load Balancer se non gia incluso. La modifica della NIC avviene nel gruppo workload. |
+| UAMI DR. | Contributor sui gruppi DR di VM/dischi e NIC. Network Contributor sui gruppi di VNet, ASG, NSG e Load Balancer quando separati, per lettura e associazione delle risorse. Reader sul gruppo DES se non gia incluso. Reader sul solo Load Balancer non concede il collegamento ai backend pool. |
 | Identita del DES, distinta dalle UAMI. | Key Vault Crypto Service Encryption User sulla chiave/vault, oppure permessi equivalenti `get`, `wrapKey`, `unwrapKey`. |
 | Operatore Terraform/deployment. | Contributor sul gruppo hosting, lettura e assegnazione delle UAMI, ruoli dati Blob/Queue necessari a creare container/code; ulteriori privilegi solo se deve assegnare ruoli. |
 
@@ -237,7 +265,7 @@ La configurazione usa solo il provider Terraform AzureRM. Gli input esistenti ha
 
 ### Come pubblicare senza Terraform con i parametri del target
 
-Sostituire i tre segnaposto con la subscription di hosting, il Resource Group e il nome della Function App esistente del cliente. Eseguire dalla radice del ramo aggiornato `feature/async-session-id-csv-log`.
+Sostituire i tre segnaposto con la subscription di hosting, il Resource Group e il nome della Function App esistente del cliente. Eseguire dalla radice del ramo aggiornato `feature/multiple-lb_logging-actions-and-info-check-rg`.
 
 **1. Preparare il pacchetto locale.** La build non usa subscription, Resource Group, Function App, login Azure o stato Terraform: il suo unico nuovo input e il percorso del ZIP. Questo permette di preparare un pacchetto prima di scegliere dove distribuirlo.
 
@@ -295,10 +323,10 @@ Per un checkout gia sul ramo corretto e con lo stato Terraform dell'ambiente, i 
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-if ((git branch --show-current) -ne 'feature/async-session-id-csv-log') {
+if ((git branch --show-current) -ne 'feature/multiple-lb_logging-actions-and-info-check-rg') {
     throw 'Selezionare prima il ramo CSV/log; lo script di deploy non cambia branch.'
 }
-git pull --ff-only origin feature/async-session-id-csv-log
+git pull --ff-only origin feature/multiple-lb_logging-actions-and-info-check-rg
 if ($LASTEXITCODE -ne 0) { throw 'Aggiornamento del checkout non riuscito.' }
 $Deployment = terraform -chdir=terraform output -json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Stato/output Terraform non disponibili.' }
@@ -336,8 +364,8 @@ Questo comando installa le utility, non Git, Terraform o Azure CLI. Azure CLI de
 **1. Controllare codice e destinazione prima di pubblicare.** Dalla radice del checkout:
 
 ```bash
-if [[ "$(git branch --show-current)" == feature/async-session-id-csv-log ]] &&
-   git pull --ff-only origin feature/async-session-id-csv-log &&
+if [[ "$(git branch --show-current)" == feature/multiple-lb_logging-actions-and-info-check-rg ]] &&
+   git pull --ff-only origin feature/multiple-lb_logging-actions-and-info-check-rg &&
    deployment_outputs=$(terraform -chdir=terraform output -json) &&
    jq '{subscription: .hosting_subscription_id.value,
          resourceGroup: .resource_group_name.value,
@@ -436,7 +464,7 @@ Le due pubblicazioni verificano questa procedura su hosting compatibile, non il 
 Il repository e privato: il cliente deve essere autorizzato e autenticato in GitHub prima del clone/pull. Il login Azure non sostituisce quello GitHub. Usare il meccanismo aziendale approvato, senza inserire token negli URL.
 
 ```powershell
-git clone --branch feature/async-session-id-csv-log --single-branch https://github.com/lupass93/attivazione-dr-bolla.git
+git clone --branch feature/multiple-lb_logging-actions-and-info-check-rg --single-branch https://github.com/lupass93/attivazione-dr-bolla.git
 Set-Location attivazione-dr-bolla
 Copy-Item ./terraform/terraform.tfvars.example ./terraform/terraform.tfvars
 az login
@@ -515,6 +543,10 @@ bash ./tests/bash-deployment.sh
 
 Il runner include [tests/powershell-deployment.ps1](tests/powershell-deployment.ps1): verifica build, pacchetti personalizzati, modalita Terraform precedente e target espliciti con Terraform assente. I controlli locali del deploy simulano Azure e non pubblicano codice. I due script di test possono essere eseguiti singolarmente senza Terraform; il runner completo richiede Terraform soltanto per i test infrastrutturali finali.
 
+Sono incluse anche le regressioni [Load Balancer multipli e gruppi distinti](tests/multiple-load-balancers.ps1), [audit delle operazioni Azure](tests/azure-audit.ps1) e [diagnostica prima del worker](tests/submission-diagnostics.ps1). Verificano associazioni effettive e riuso senza duplicati, errori di autorizzazione non scambiati per risorse assenti, numerazione dei retry, mascheramento dei segreti e 503 compatibile con diagnostica persistente.
+
+Il [collaudo Azure di rete e logging](tests/live-multiple-load-balancers.ps1) e separato dal runner locale. Richiede una configurazione esplicita del laboratorio, utente/tenant approvati e gruppi con tag `purpose=multiple-lb-validation`; offre i casi `QueueFailure`, `MissingPool`, `Success` e `Reuse`. I primi due preparano e ripristinano guasti solo sul laboratorio; gli altri creano o riusano workload reali. Non usarlo sull'ambiente cliente.
+
 I tre script live sono separati dai test locali per non avviare accidentalmente risorse: [validazione delle richieste](tests/live-request-validation.ps1), [preflight negativo](tests/live-preflight.ps1) e [attivazione e verifica Azure](tests/live-session.ps1). Leggono gli output Terraform locali, richiedono login e ruoli di verifica sulle risorse del lab e conservano prove in `out/live`, esclusa da Git. Gli ultimi due richiedono `-CsvBlobPath`, `-TargetSubscriptionId` e `-TargetResourceGroup`. Preparare soltanto risorse di test autorizzate; il test negativo richiede un ASG DR deliberatamente assente, mentre quello positivo richiede una destinazione workload inizialmente vuota e una NIC sorgente con ASG/backend pool. Non eseguirli su un ambiente cliente senza approvazione.
 
 Il nuovo [collaudo live delle quattro priorita](tests/live-csv-priority.ps1) usa gli stessi tre parametri e richiede quattro VM sorgenti, una per classe, elencate nel CSV in ordine inverso. Verifica il piano ordinato, gli istanti di inizio/fine dei tentativi, il formato JSON durante l'avanzamento, i log per stage e l'ordine effettivo di creazione delle VM in Azure. Le destinazioni devono essere inizialmente vuote; il test crea workload reali.
@@ -535,6 +567,27 @@ Il nuovo [collaudo live delle quattro priorita](tests/live-csv-priority.ps1) usa
 | REQ-BASH-002: pubblicare e verificare il codice senza avviare DR. | Tre funzioni, due 400 previsti, report schema 2 esistente, code vuote e impostazioni del ramo padre invariate nel collaudo Azure. |
 | REQ-BUILD-001: preparare un ZIP locale con percorso esplicito, senza target Azure o Terraform. | Build PowerShell e Bash con percorsi relativi/con spazi, default conservati e output nel sorgente rifiutato. |
 | REQ-DEPLOY-001: pubblicare con i tre riferimenti del target, senza Terraform. | Test PowerShell/Bash con Terraform assente, hostname restituito da Azure e input parziali/misti bloccati prima delle modifiche; compatibilita degli output Terraform verificata separatamente. |
+| REQ-MLB-001: conservare tutte le associazioni LB della NIC replicata. | Due LB omonimi in gruppi distinti, tre pool su due configurazioni IP, verifica della scrittura effettiva, riuso senza duplicati e pool mancante che blocca il preflight. |
+| REQ-RG-001: ricavare i gruppi dalle relazioni sorgenti complete. | Gruppi separati per NIC, VNet, ASG, NSG e ciascun LB; nessuna assunzione che coincidano con il gruppo della VM. |
+| REQ-AUDIT-001 e REQ-HISTORY-001: tracciare azioni e configurazioni, anche prima dell'accodamento. | Eventi di inizio/esito/durata/identita/tentativo, cronologia per sessione e VM, diagnostica Blob prima del worker e test di redazione delle credenziali. |
+| CON-CONTRACT-001: non cambiare log e risposte cliente esistenti. | Nomi e tipi HTTP verificati, quattro classi e contatori preservati, stage log e metadati cliente mantenuti, confronto con lo stato persistente anche in errore. |
+
+### Quale collaudo di Load Balancer multipli e logging e stato eseguito
+
+Il 17 novembre 2026 la versione e stata distribuita in un nuovo laboratorio privato, separato da qualunque ambiente cliente. Le quattro prove reali hanno superato **1.414 verifiche**:
+
+| Quale comportamento e stato provato | Quale risultato Azure e stato verificato |
+|---|---|
+| Invio a una coda di test inesistente e recupero con lo stesso identificativo. | 273 verifiche: 503 originale invariato, stato PENDING non confermato, errore salvato prima del worker, retry accettato e nessuna creazione per la VM deliberatamente assente. |
+| Pool `api` mancante nel secondo Load Balancer DR. | 250 verifiche: errore specifico sul pool del secondo LB, fallimento nel preflight globale, nessuna creazione di dischi/NIC/VM e ripristino del pool di test. |
+| Creazione effettiva da una destinazione vuota. | 464 verifiche: VM e guest agent operativi, due dischi cifrati copiati senza snapshot, NIC in gruppo separato con due IP e tre associazioni a due LB omonimi in gruppi distinti. |
+| Nuova sessione sulle risorse gia create. | 427 verifiche: riuso senza nuovi dischi/NIC/VM, senza aggiornare nuovamente la NIC e senza duplicare o perdere associazioni. |
+
+Sono stati confrontati report HTTP e stato persistente, verificati i log per stage nel formato precedente e letti gli audit tecnici. Azure Monitor ha restituito 1.462 tracce di audit nella finestra interrogata. Le azioni di creazione/aggiornamento workload registrate indicavano esclusivamente la subscription DR; configurazione della VM sorgente e della sua NIC invariate prima/dopo la Function. Le code di attivazione e poison erano vuote al controllo finale.
+
+Il runner locale ha superato dodici suite PowerShell, 71 casi Bash e 14 test Terraform. Formattazione e validazione Terraform sono riuscite; restano l'avviso del vecchio input privato `dr_subscription_id` e le segnalazioni del checker personale sull'interfaccia ambientale preesistente. Non sono state introdotte nuove variabili o catene di locals.
+
+La Function e lo Storage Account sono rimasti con accesso pubblico disabilitato. Le sole tre VM create per questa prova, inclusa la postazione operatore, sono state deallocate; il tunnel temporaneo e stato chiuso. Dischi, indirizzi, Load Balancer, Private Endpoint e servizi di hosting/log restano presenti e possono generare costi. Il collaudo non certifica disponibilita applicativa, consistenza multi-disco o assenza di impatti prestazionali su workload cliente.
 
 ### Quale collaudo del nuovo CSV e report e stato completato
 
@@ -581,7 +634,7 @@ Il collaudo storico del 12 ottobre riguardava il vecchio percorso con snapshot: 
 
 - Il riuso dei dischi non ne aggiorna il contenuto. Una nuova sessione non garantisce un nuovo punto di ripristino.
 - Il riuso VM confronta dimensione e disco OS, non riconcilia dischi dati, avvio, identita, estensioni o salute. Non esiste rollback automatico.
-- Il codice ricrea una NIC e una configurazione IP primaria, conserva l'IP come statico e aggiunge il backend pool previsto. Non riproduce tutta la topologia o tutte le proprieta di sicurezza e non rimuove collegamenti esterni.
+- Il codice replica la NIC primaria con tutte le sue configurazioni IP e associazioni backend. Non replica le NIC secondarie della VM, non riconcilia regole NSG/subnet, frontend o probe dei Load Balancer e non rimuove collegamenti esterni. Le configurazioni IP della NIC replicata devono riferire la subnet rilevata.
 - Le copie per disco non coordinano le scritture applicative. Consistenza, Recovery Point Objective (RPO), perdita dati massima ammessa, e Recovery Time Objective (RTO), tempo massimo di ripristino, richiedono prove applicative.
 - Non esistono lock tra sessioni diverse, smantellamento automatico, autorizzazione del chiamante per singolo workload o retention automatica dei log/sessioni.
 - `functionTimeout=-1` rimuove il limite configurato di esecuzione, non riavvii o eventi di piattaforma. La coda elimina la dipendenza della replica dalla risposta HTTP, non rende il worker ininterrompibile.
@@ -612,6 +665,7 @@ La documentazione presuppone prerequisiti e autorizzazioni predisposti dall'orga
 - Deploy Bash, passo 2: [package deployment Flex Consumption e endpoint privato](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push?pivots=flex-consumption-plan), [implementazione](scripts/deploy.sh), [test ripetibili](tests/bash-deployment.sh).
 - Target esplicito: [lettura della Function App con Azure CLI](https://learn.microsoft.com/cli/azure/functionapp#az-functionapp-show), [parametri subscription/gruppo/nome/pacchetto del deployment](https://learn.microsoft.com/cli/azure/functionapp/deployment/source#az-functionapp-deployment-source-config-zip), [parameter set PowerShell mutuamente esclusivi](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_parameter_sets?view=powershell-7.6).
 - Terminale Bash: [effetto di `set -e` e gestione dell'errore nelle condizioni `if`](https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html).
+- Networking e logging: [backend pool](https://learn.microsoft.com/azure/load-balancer/backend-pool-management), [permessi di rete e associazione](https://learn.microsoft.com/azure/role-based-access-control/permissions/networking), [log PowerShell e livelli](https://learn.microsoft.com/azure/azure-functions/functions-reference-powershell#logging), [configurazione della telemetria](https://learn.microsoft.com/azure/azure-functions/configure-monitoring).
 
 ## Glossario della procedura Bash
 
