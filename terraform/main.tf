@@ -205,7 +205,7 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     PSWorkerInProcConcurrencyUpperBound       = "1"
     SNAPSHOT_NAME_PREFIX                      = "snap-"
     TARGET_SUBSCRIPTION_SUFFIX                = var.target_subscription_suffix
-    TARGET_RESOURCE_GROUP_SUFFIX              = var.target_name_suffix
+    TARGET_RESOURCE_GROUP_SUFFIX              = var.target_resource_group_suffix == null ? var.target_name_suffix : var.target_resource_group_suffix
     TARGET_VNET_NAME_SUFFIX                   = var.target_name_suffix
     TARGET_VNET_RG_SUFFIX                     = var.target_name_suffix
     TARGET_LB_NAME_SUFFIX                     = var.target_name_suffix

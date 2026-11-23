@@ -10,6 +10,8 @@ integration_subnet_prefix       = "10.80.0.0/27"
 private_endpoints_subnet_prefix = "10.80.0.32/27"
 target_subscription_suffix     = "-DR"
 target_name_suffix             = "-DR"
+# Uncomment only to override the suffix for the workload and NIC Resource Groups.
+# target_resource_group_suffix = "-RECOVERY"
 
 resource_names = {
 	virtual_network                         = "vnet-client-functions"

@@ -85,12 +85,27 @@ variable "private_endpoints_subnet_prefix" {
 
 variable "target_name_suffix" {
   type        = string
-  description = "Nonempty suffix used to resolve existing DR Resource Groups, VNet, DES, ASGs and Load Balancers."
+  description = "Suffix for DR networking and encryption resources and their groups. Also applies to workload and NIC groups unless target_resource_group_suffix is set."
   default     = "-DR"
 
   validation {
     condition     = length(trimspace(var.target_name_suffix)) > 0 && var.target_name_suffix == trimspace(var.target_name_suffix)
     error_message = "Provide a nonempty DR naming suffix without leading or trailing whitespace."
+  }
+}
+
+variable "target_resource_group_suffix" {
+  type        = string
+  description = "Optional suffix for the DR Resource Groups containing virtual machines, managed disks, and replicated network interfaces. Null preserves target_name_suffix."
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.target_resource_group_suffix == null ? true : (
+      length(trimspace(var.target_resource_group_suffix)) > 0 &&
+      var.target_resource_group_suffix == trimspace(var.target_resource_group_suffix)
+    )
+    error_message = "Provide a nonempty DR Resource Group suffix without leading or trailing whitespace, or omit it to inherit target_name_suffix."
   }
 }
 

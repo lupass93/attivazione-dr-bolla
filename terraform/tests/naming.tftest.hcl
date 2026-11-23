@@ -278,8 +278,55 @@ run "subscription_and_resource_suffixes_are_independent" {
       azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_RESOURCE_GROUP_SUFFIX"] == "-MS-DR" &&
       azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_VNET_NAME_SUFFIX"] == "-MS-DR" &&
     azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_DES_NAME_SUFFIX"] == "-MS-DR")
-    error_message = "An isolated lab resource suffix must not change the source-to-DR subscription mapping."
+    error_message = "Without a Resource Group override, the workload group must inherit the resource suffix without changing the subscription mapping."
   }
+}
+
+run "workload_group_suffix_does_not_change_other_suffixes" {
+  command = plan
+
+  variables {
+    target_resource_group_suffix = "-RECOVERY"
+    target_name_suffix           = "-MS-DR"
+    target_subscription_suffix   = "-DR"
+  }
+
+  assert {
+    condition     = azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_RESOURCE_GROUP_SUFFIX"] == "-RECOVERY"
+    error_message = "The workload and NIC Resource Groups must use the explicit Resource Group suffix."
+  }
+
+  assert {
+    condition = alltrue([
+      for setting, suffix in {
+        TARGET_SUBSCRIPTION_SUFFIX = "-DR"
+        TARGET_VNET_NAME_SUFFIX    = "-MS-DR"
+        TARGET_VNET_RG_SUFFIX      = "-MS-DR"
+        TARGET_LB_NAME_SUFFIX      = "-MS-DR"
+        TARGET_LB_RG_SUFFIX        = "-MS-DR"
+        TARGET_DES_NAME_SUFFIX     = "-MS-DR"
+        TARGET_DES_RG_SUFFIX       = "-MS-DR"
+        TARGET_ASG_NAME_SUFFIX     = "-MS-DR"
+      } : azurerm_function_app_flex_consumption.hosting.app_settings[setting] == suffix
+    ])
+    error_message = "Changing the workload Resource Group suffix must not affect subscription, networking or encryption suffixes."
+  }
+}
+
+run "empty_workload_group_suffix_is_rejected" {
+  command = plan
+  variables {
+    target_resource_group_suffix = ""
+  }
+  expect_failures = [var.target_resource_group_suffix]
+}
+
+run "padded_workload_group_suffix_is_rejected" {
+  command = plan
+  variables {
+    target_resource_group_suffix = " -RECOVERY "
+  }
+  expect_failures = [var.target_resource_group_suffix]
 }
 
 run "unknown_naming_key_is_rejected" {

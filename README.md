@@ -71,7 +71,7 @@ Le operazioni su VM/dischi/rete usano invece Azure Resource Manager (ARM), il se
 
 Application Insights raccoglie telemetria del processo; Log Analytics permette di consultare log e metriche. Il container log conserva i file per stage e la cronologia tecnica delle operazioni, anche quando l'accodamento fallisce. Lo stato della sessione resta separato.
 
-I nomi predefiniti dei container sono `app-package`, `dr-configs`, `dr-logs`, `dr-sessions`. La coda e `dr-activation`; `dr-activation-poison` riceve i messaggi che esauriscono i tentativi di consegna. La mappa ambientale esistente `resource_names` permette nomi cliente, inclusi `session_container` e `activation_queue`. Non sono introdotte nuove variabili root o alias di letterali; gli input esistenti restano l'interfaccia per ambienti e tenant differenti.
+I nomi predefiniti dei container sono `app-package`, `dr-configs`, `dr-logs`, `dr-sessions`. La coda e `dr-activation`; `dr-activation-poison` riceve i messaggi che esauriscono i tentativi di consegna. La mappa ambientale `resource_names` permette di personalizzare questi nomi, inclusi `session_container` e `activation_queue`, senza una variabile distinta per ciascun nome.
 
 ## Come viene scelta la destinazione per ciascuna VM
 
@@ -102,13 +102,15 @@ L'ordine vale **all'interno della sessione**, non tra messaggi di sessioni diver
 
 Il worker risolve la primaria tramite UAMI sorgente e la relativa DR tramite UAMI DR: **nome primario + `target_subscription_suffix`**, predefinito `-DR`. La destinazione deve essere unica, abilitata, distinta dalla sorgente e nello stesso tenant Microsoft Entra, la directory delle identita. Non esiste una destinazione globale di fallback.
 
-`target_name_suffix`, anch'esso predefinito `-DR`, determina invece i nomi dei prerequisiti: Resource Group, VNet, ASG, DES e Load Balancer. La subnet conserva il nome sorgente; VM e dischi conservano i propri nomi. I due suffissi sono indipendenti.
+`target_name_suffix`, predefinito `-DR`, determina i suffissi di rete, bilanciamento e cifratura e dei rispettivi Resource Group. L'opzionale `target_resource_group_suffix` cambia solo il suffisso dei gruppi che ospitano VM, dischi e NIC replicate. Se omesso, questi gruppi continuano a usare `target_name_suffix`. La subscription resta governata da `target_subscription_suffix`; subnet, VM e dischi conservano i propri nomi.
+
+Per esempio, con `target_resource_group_suffix = "-RECOVERY"` e `target_name_suffix` lasciato a `-DR`, la Function cerca la VM e i dischi in `rg-web-RECOVERY` a partire da `rg-web`, ma continua a cercare la rete e il suo gruppo con `-DR`. I gruppi di destinazione devono gia esistere: questa impostazione non crea o rinomina Resource Group. Si puo attivare l'opzione nel [file di esempio dei valori Terraform](terraform/terraform.tfvars.example).
 
 ### Come vengono mantenute le associazioni di rete e i Resource Group distinti
 
 La Function legge gli identificativi completi della NIC primaria e delle sue configurazioni IP. Ogni Load Balancer viene identificato da subscription, Resource Group e nome: due Load Balancer omonimi in gruppi diversi non vengono confusi. Tutti i loro backend pool richiesti devono esistere prima delle creazioni.
 
-La NIC DR viene creata nel gruppo ricavato da quello della NIC sorgente, usando il suffisso Resource Group esistente. VNet, ASG, NSG e ciascun Load Balancer usano il proprio Resource Group sorgente, non quello della VM. Per ASG/NSG si applica il suffisso dei gruppi di rete; il nome NSG usa il suffisso dei nomi VNet gia configurato. Non vengono introdotte nuove variabili di naming.
+La NIC DR viene creata nel gruppo ricavato da quello della NIC sorgente, usando `target_resource_group_suffix` se impostato, anche quando il gruppo della NIC e distinto da quello della VM. VNet, ASG, NSG e ciascun Load Balancer usano il proprio Resource Group sorgente, non quello della VM. Per ASG/NSG si applica il suffisso dei gruppi di rete; il nome NSG usa il suffisso dei nomi VNet gia configurato.
 
 La replica mantiene tutte le configurazioni IP della NIC primaria, gli indirizzi privati statici e gli ASG di ciascuna configurazione. Una nuova NIC conserva anche il collegamento al corrispondente NSG. Il codice non riscrive le regole NSG o le associazioni della subnet, che restano responsabilita del gestore della rete.
 
