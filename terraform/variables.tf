@@ -85,7 +85,7 @@ variable "private_endpoints_subnet_prefix" {
 
 variable "target_name_suffix" {
   type        = string
-  description = "Suffix for DR networking and encryption resources and their groups. Also applies to workload and NIC groups unless target_resource_group_suffix is set."
+  description = "Default suffix for DR networking and encryption resources and their groups. The Disk Encryption Set name and the workload and NIC groups can be overridden separately."
   default     = "-DR"
 
   validation {
@@ -106,6 +106,18 @@ variable "target_resource_group_suffix" {
       var.target_resource_group_suffix == trimspace(var.target_resource_group_suffix)
     )
     error_message = "Provide a nonempty DR Resource Group suffix without leading or trailing whitespace, or omit it to inherit target_name_suffix."
+  }
+}
+
+variable "target_des_name_suffix" {
+  type        = string
+  description = "Optional suffix appended only to the name used to find the existing DR Disk Encryption Set. Null inherits target_name_suffix. An empty string uses the source name in DR."
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.target_des_name_suffix == null ? true : can(regex("^[A-Za-z0-9_-]*$", var.target_des_name_suffix))
+    error_message = "Use only letters, numbers, underscores, and hyphens for the Disk Encryption Set name suffix. Use an empty string for no suffix or omit it to inherit target_name_suffix."
   }
 }
 

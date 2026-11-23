@@ -56,6 +56,8 @@ Un Private Endpoint collega un servizio a un indirizzo privato della Virtual Net
 
 Terraform, lo strumento che configura le risorse Azure tramite file dichiarativi, crea ingresso privato della Function, integrazione VNet in uscita e Private Endpoint Blob/Queue/Table. La Function ha accesso pubblico disabilitato. Lo Storage Account preesistente deve avere accesso pubblico e shared key disabilitati; Terraform non ne modifica queste proprieta.
 
+La configurazione Cross-Origin Resource Sharing (CORS), che indica al browser da quali origini puo leggere le risposte della Function, consente solo `https://portal.azure.com`. La Function App non abilita la condivisione delle risposte a richieste cross-origin con credenziali del browser (`support_credentials = false`). L'accesso pubblico resta disabilitato e i requisiti di rete privata e autenticazione restano invariati. Vedi [la configurazione CORS in Terraform](terraform/main.tf) e [Microsoft Learn](https://learn.microsoft.com/azure/azure-functions/functions-how-to-use-azure-function-app-settings#cors).
+
 Starter, worker e API di stato usano HTTPS e UAMI. Il client storage del codice rifiuta nomi che non risolvono esclusivamente in indirizzi IPv4 privati: **non esiste fallback allo storage pubblico**. Il queue trigger e lo scale controller usano la connessione identity-based `DR_QUEUE_CONNECTION` e la rete privata configurata.
 
 Le operazioni su VM/dischi/rete usano invece Azure Resource Manager (ARM), il servizio di gestione Azure, con contesti identita/subscription espliciti. Non trasferiscono file tramite connessioni remote alle VM e non richiedono peering tra primario e DR. Gli endpoint Microsoft di autenticazione e management restano necessari: non vanno confusi con gli endpoint dati privati dello storage.
@@ -102,9 +104,11 @@ L'ordine vale **all'interno della sessione**, non tra messaggi di sessioni diver
 
 Il worker risolve la primaria tramite UAMI sorgente e la relativa DR tramite UAMI DR: **nome primario + `target_subscription_suffix`**, predefinito `-DR`. La destinazione deve essere unica, abilitata, distinta dalla sorgente e nello stesso tenant Microsoft Entra, la directory delle identita. Non esiste una destinazione globale di fallback.
 
-`target_name_suffix`, predefinito `-DR`, determina i suffissi di rete, bilanciamento e cifratura e dei rispettivi Resource Group. L'opzionale `target_resource_group_suffix` cambia solo il suffisso dei gruppi che ospitano VM, dischi e NIC replicate. Se omesso, questi gruppi continuano a usare `target_name_suffix`. La subscription resta governata da `target_subscription_suffix`; subnet, VM e dischi conservano i propri nomi.
+`target_name_suffix`, predefinito `-DR`, determina i suffissi predefiniti di rete, bilanciamento e cifratura e dei rispettivi Resource Group. L'opzionale `target_resource_group_suffix` cambia solo il suffisso dei gruppi che ospitano VM, dischi e NIC replicate. Se omesso, questi gruppi continuano a usare `target_name_suffix`. La subscription resta governata da `target_subscription_suffix`; subnet, VM e dischi conservano i propri nomi.
 
 Per esempio, con `target_resource_group_suffix = "-RECOVERY"` e `target_name_suffix` lasciato a `-DR`, la Function cerca la VM e i dischi in `rg-web-RECOVERY` a partire da `rg-web`, ma continua a cercare la rete e il suo gruppo con `-DR`. I gruppi di destinazione devono gia esistere: questa impostazione non crea o rinomina Resource Group. Si puo attivare l'opzione nel [file di esempio dei valori Terraform](terraform/terraform.tfvars.example).
+
+Un Disk Encryption Set (DES) collega i dischi alla chiave di cifratura. Il parametro facoltativo `target_des_name_suffix` cambia solo il suffisso del nome con cui la Function cerca il DES nella subscription DR. Con `target_des_name_suffix = "-BOLLA"` e `target_name_suffix = "-DR"`, da `des-primario` in `rg-keys` la Function cerca `des-primario-BOLLA` in `rg-keys-DR`. Se omesso, il parametro eredita `target_name_suffix`; con `""` la Function cerca lo stesso nome del sorgente, ma sempre nella subscription DR. Il DES di destinazione deve gia esistere: questa impostazione non crea, rinomina o sposta il DES.
 
 ### Come vengono mantenute le associazioni di rete e i Resource Group distinti
 
@@ -120,7 +124,7 @@ Le combinazioni devono essere supportate da Azure. La Function non crea i Load B
 
 Esempio: la primaria `site-a` viene associata a `site-a-DR`; `rg-web` e `vnet-web` richiedono `rg-web-DR` e `vnet-web-DR`. Un'altra primaria `site-b` viene associata alla propria `site-b-DR`, anche nello stesso CSV.
 
-Un Application Security Group (ASG) raggruppa NIC per l'applicazione delle regole di sicurezza. Un Disk Encryption Set (DES) indica la chiave utilizzata per cifrare i dischi. Il DES DR determina la regione della replica.
+Un Application Security Group (ASG) raggruppa NIC per l'applicazione delle regole di sicurezza. Il DES DR determina la regione della replica.
 
 **La copia diretta richiede dischi nella stessa regione e subscription nello stesso tenant. Non realizza DR geografico.** Conserva la cifratura DR e rifiuta dischi esistenti originati da snapshot; non li cancella o sostituisce automaticamente.
 

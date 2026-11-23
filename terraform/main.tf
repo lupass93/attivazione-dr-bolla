@@ -178,6 +178,11 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     minimum_tls_version                    = "1.2"
     scm_minimum_tls_version                = "1.2"
     application_insights_connection_string = azurerm_application_insights.hosting.connection_string
+
+    cors {
+      allowed_origins     = ["https://portal.azure.com"]
+      support_credentials = false
+    }
   }
 
   app_settings = {
@@ -210,7 +215,7 @@ resource "azurerm_function_app_flex_consumption" "hosting" {
     TARGET_VNET_RG_SUFFIX                     = var.target_name_suffix
     TARGET_LB_NAME_SUFFIX                     = var.target_name_suffix
     TARGET_LB_RG_SUFFIX                       = var.target_name_suffix
-    TARGET_DES_NAME_SUFFIX                    = var.target_name_suffix
+    TARGET_DES_NAME_SUFFIX                    = var.target_des_name_suffix == null ? var.target_name_suffix : var.target_des_name_suffix
     TARGET_DES_RG_SUFFIX                      = var.target_name_suffix
     TARGET_ASG_NAME_SUFFIX                    = var.target_name_suffix
   }

@@ -329,6 +329,59 @@ run "padded_workload_group_suffix_is_rejected" {
   expect_failures = [var.target_resource_group_suffix]
 }
 
+run "des_name_suffix_does_not_change_other_suffixes" {
+  command = plan
+
+  variables {
+    target_des_name_suffix       = "-BOLLA"
+    target_resource_group_suffix = "-RECOVERY"
+    target_name_suffix           = "-MS-DR"
+    target_subscription_suffix   = "-DR"
+  }
+
+  assert {
+    condition = alltrue([
+      for setting, suffix in {
+        TARGET_DES_NAME_SUFFIX       = var.target_des_name_suffix
+        TARGET_DES_RG_SUFFIX         = var.target_name_suffix
+        TARGET_RESOURCE_GROUP_SUFFIX = var.target_resource_group_suffix
+        TARGET_SUBSCRIPTION_SUFFIX   = var.target_subscription_suffix
+        TARGET_VNET_NAME_SUFFIX      = var.target_name_suffix
+        TARGET_VNET_RG_SUFFIX        = var.target_name_suffix
+        TARGET_LB_NAME_SUFFIX        = var.target_name_suffix
+        TARGET_LB_RG_SUFFIX          = var.target_name_suffix
+        TARGET_ASG_NAME_SUFFIX       = var.target_name_suffix
+      } : azurerm_function_app_flex_consumption.hosting.app_settings[setting] == suffix
+    ])
+    error_message = "Overriding the Disk Encryption Set name must not affect its Resource Group or any other target suffix."
+  }
+}
+
+run "empty_des_name_suffix_preserves_the_source_name" {
+  command = plan
+
+  variables {
+    target_des_name_suffix = ""
+    target_name_suffix     = "-MS-DR"
+  }
+
+  assert {
+    condition = (
+      azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_DES_NAME_SUFFIX"] == "" &&
+      azurerm_function_app_flex_consumption.hosting.app_settings["TARGET_DES_RG_SUFFIX"] == var.target_name_suffix
+    )
+    error_message = "An explicit empty Disk Encryption Set name suffix must not inherit the general suffix or clear the Resource Group suffix."
+  }
+}
+
+run "invalid_des_name_suffix_is_rejected" {
+  command = plan
+  variables {
+    target_des_name_suffix = "-INVALID/SUFFIX"
+  }
+  expect_failures = [var.target_des_name_suffix]
+}
+
 run "unknown_naming_key_is_rejected" {
   command = plan
   variables {
